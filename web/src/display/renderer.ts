@@ -24,16 +24,11 @@ import {
   rangeMeters,
   metersToMiles,
   formatSpeed,
-  horizonRadiusM,
-  groundToSkyAngles,
-  projectAircraft,
   projectSkyPoint,
-  skyGlyphScale,
   lerpAzimuth,
   EMERGENCY_SQUAWKS,
   type Aircraft,
   type Config,
-  type GroundSample,
   type Meters,
   type Point,
   type SkyAngles,
@@ -1328,7 +1323,7 @@ export class Renderer {
     }
   }
 
-  private toScreen(ll: [number, number], cfg: Config, proj: ProjOpts, altFt = 0): Point {
+  private toScreen(ll: [number, number], cfg: Config, proj: ProjOpts, _altFt = 0): Point {
     const m = llToMeters(ll[0], ll[1], cfg.centerLat, cfg.centerLon);
     return project(this.relativeToFollow(m), proj);
   }

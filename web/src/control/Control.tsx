@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Aircraft, Config, ShowFields, LocationProfile } from "@shared/index.js";
-import { formatLatLon } from "@shared/geo.js";
 import { useStream } from "../lib/useStream.js";
 import { nextISSPass, type Tle } from "../display/celestial.js";
-import { ColorRow, Row, Section, Segmented, Slider, TextInput, Toggle } from "./components.js";
+import { ColorRow, Row, Section, Segmented, Slider, Toggle } from "./components.js";
 import { PRESETS } from "./presets.js";
 import { LOCATION_PRESETS } from "./locationPresets.js";
 import { type City, prefetchCities, searchCities } from "../lib/cities.js";
@@ -729,10 +728,6 @@ export function Control() {
 
   // ISS pass finder.
 
-  // Location editor (Nominatim via the server's /api/geocode).
-  const [geoBusy, setGeoBusy] = useState(false);
-  const [geoErr, setGeoErr] = useState<string | null>(null);
-
   // ISS pass finder (for the Sky section).
   const [tles, setTles] = useState<Tle[]>([]);
   useEffect(() => {
@@ -765,85 +760,6 @@ export function Control() {
     conn.patchConfig({ showFields: { ...cfg.showFields, [k]: v } });
   const statusMessage = state.status?.message ? ` · ${state.status.message}` : "";
 
-  const changeLocation = async (q: string) => {
-    if (!q.trim()) return;
-    setGeoBusy(true);
-    setGeoErr(null);
-    try {
-      const r = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
-      if (!r.ok) {
-        setGeoErr(r.status === 404 ? `No match for “${q}”` : "Lookup failed");
-        return;
-      }
-      const hit = (await r.json()) as { lat: number; lon: number; name: string };
-      set({ centerLat: hit.lat, centerLon: hit.lon, locationName: hit.name });
-    } catch {
-      setGeoErr("Lookup failed");
-    } finally {
-      setGeoBusy(false);
-    }
-  };
-
-  // --- saved location profiles (favorite airports) ---
-  const genId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-  const atCurrent = (p: { lat: number; lon: number }) =>
-    Math.abs(p.lat - cfg.centerLat) < 1e-4 && Math.abs(p.lon - cfg.centerLon) < 1e-4;
-  const switchToProfile = (p: LocationProfile) =>
-    set({ centerLat: p.lat, centerLon: p.lon, radiusMiles: p.radiusMiles, locationName: p.name });
-  const saveCurrentProfile = () => {
-    const name = cfg.locationName?.trim() || formatLatLon(cfg.centerLat, cfg.centerLon);
-    const profile: LocationProfile = {
-      id: genId(),
-      name,
-      lat: cfg.centerLat,
-      lon: cfg.centerLon,
-      radiusMiles: cfg.radiusMiles,
-    };
-    // Replace any existing profile already saved at this spot.
-    const rest = cfg.locationProfiles.filter((p) => !atCurrent(p));
-    set({ locationProfiles: [...rest, profile] });
-  };
-  const removeProfile = (id: string) =>
-    set({ locationProfiles: cfg.locationProfiles.filter((p) => p.id !== id) });
-  const centerOnTraffic = () => {
-    const ac = state.aircraft.filter((a) => a.lat != null && a.lon != null);
-    if (!ac.length) return;
-    const lat = ac.reduce((s, a) => s + (a.lat as number), 0) / ac.length;
-    const lon = ac.reduce((s, a) => s + (a.lon as number), 0) / ac.length;
-    set({ centerLat: lat, centerLon: lon, locationName: "Traffic center" });
-  };
-
-  const useCurrentLocation = () => {
-    if (!navigator.geolocation) {
-      setGeoErr("Geolocation not supported on this device");
-      return;
-    }
-    setGeoBusy(true);
-    setGeoErr(null);
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        set({
-          centerLat: pos.coords.latitude,
-          centerLon: pos.coords.longitude,
-          locationName: "Current location",
-        });
-        setGeoBusy(false);
-      },
-      (err) => {
-        setGeoBusy(false);
-        const msg =
-          err.code === err.PERMISSION_DENIED
-            ? "Location permission denied"
-            : err.code === err.TIMEOUT
-              ? "Location request timed out"
-              : "Location unavailable";
-        setGeoErr(msg);
-      },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60_000 },
-    );
-  };
-
-  // Close detail popup if selected aircraft disappears from feed.
   const selectedStillPresent =
     selectedAc && state.aircraft.some((a) => a.hex === selectedAc.hex);
   const activeAc = selectedStillPresent
