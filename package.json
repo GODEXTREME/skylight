@@ -2,20 +2,21 @@
   "name": "skylight",
   "version": "0.1.0",
   "private": true,
-  "description": "Skylight — project the aircraft passing overhead onto your ceiling, in real time, from an RTL-SDR.",
+  "description": "Skylight \u2014 project the aircraft passing overhead onto your ceiling, in real time, from an RTL-SDR.",
   "type": "module",
   "packageManager": "pnpm@10.28.2",
   "scripts": {
     "dev:server": "pnpm -F server dev",
     "dev:web": "pnpm -F web dev",
     "dev:tracker": "pnpm -F tracker dev",
-    "dev:radio": "cross-env DATA_SOURCE=radio pnpm dev",
+    "dev:radio": "cross-env DATA_SOURCE=radio concurrently \"pnpm dev:server\" \"pnpm dev:web\"",
     "build": "pnpm -F web build",
     "generate:cities": "node scripts/generate-cities.mjs",
     "start": "pnpm -F server start",
     "start:radio": "cross-env DATA_SOURCE=radio pnpm -F server start",
     "test": "vitest run",
-    "typecheck": "tsc -p shared/tsconfig.json && pnpm -F server typecheck && pnpm -F web typecheck"
+    "typecheck": "tsc -p shared/tsconfig.json && pnpm -F server typecheck && pnpm -F web typecheck",
+    "dev": "concurrently \"pnpm dev:server\" \"pnpm dev:web\""
   },
   "devDependencies": {
     "concurrently": "^9.1.0",
