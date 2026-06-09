@@ -66,6 +66,8 @@ async function main(): Promise<void> {
   const tleStore = new TleStore(resolve(DATA_DIR, "tle-cache.json"));
   await tleStore.load();
 
+  const hostMatcher = buildHostMatcher(process.env);
+
   const app = express();
   app.use(express.json({ limit: "64kb" }));
 
