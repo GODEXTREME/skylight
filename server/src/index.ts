@@ -73,7 +73,18 @@ async function main(): Promise<void> {
 
   const server = createServer(app);
   const stats = new FlightStats();
-  const poller = new Poller({
+  // poller is declared first so hub's lazy callbacks can reference it safely.
+  let poller: Poller;
+  const hub = new Hub(server, {
+    store,
+    getSnapshot: () => poller.getSnapshot(),
+    getStatus: () => poller.getStatus(),
+    isOriginAllowed: (origin) => {
+      if (!origin) return true;
+      try { return hostMatcher.test(new URL(origin).hostname); } catch { return false; }
+    },
+  });
+  poller = new Poller({
     source: SOURCE,
     apiUrlTemplate: API_URL,
     pollMs: POLL_MS,

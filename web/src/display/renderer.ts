@@ -1632,43 +1632,12 @@ return projectSkyPoint(az, alt, proj, this.horizonM(cfg));
     if (ac.lat == null || ac.lon == null || ac.destLat == null || ac.destLon == null) return;
     if (!routePlausible(ac, cfg)) return;
 
-    const lat1 = ac.lat;
-    const lon1 = ac.lon;
-    const lat2 = ac.destLat;
-    const lon2 = ac.destLon;
-
-    const φ1 = lat1 * DEG, λ1 = lon1 * DEG;
-    const φ2 = lat2 * DEG, λ2 = lon2 * DEG;
-    const dφ = φ2 - φ1;
-    const dλ = λ2 - λ1;
-    const a = Math.sin(dφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(dλ / 2) ** 2;
-    const δ = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-
-    if (δ < 1e-6) return;
-
-    const steps = 60;
-    const pts: Point[] = [];
-    for (let i = 0; i <= steps; i++) {
-      const f = i / steps;
-      const A = Math.sin((1 - f) * δ) / Math.sin(δ);
-      const B = Math.sin(f * δ) / Math.sin(δ);
-      const x = A * Math.cos(φ1) * Math.cos(λ1) + B * Math.cos(φ2) * Math.cos(λ2);
-      const y = A * Math.cos(φ1) * Math.sin(λ1) + B * Math.cos(φ2) * Math.sin(λ2);
-      const z = A * Math.sin(φ1) + B * Math.sin(φ2);
-      const latI = Math.atan2(z, Math.sqrt(x * x + y * y)) / DEG;
-      const lonI = Math.atan2(y, x) / DEG;
-
-      const m = llToMeters(latI, lonI, cfg.centerLat, cfg.centerLon);
-      pts.push(project(this.relativeToFollow(m), proj));
-    }
-
-    const ctx = this.ctx;
     const destAz = bearing(ac.lat, ac.lon, ac.destLat, ac.destLon);
-    const pts: Point[] = [v.p];
+    const pts: Point[] = [];
 
     if (cfg.projectionMode === "sky" && v.sky) {
-      // Curve along the dome from the aircraft's sky position toward the
-      // destination azimuth at the horizon — a realistic look-up great-circle hint.
+      // Sky mode: curve along the dome from the aircraft toward the destination azimuth.
+      pts.push(v.p);
       const steps = 10;
       for (let i = 1; i <= steps; i++) {
         const f = i / steps;
@@ -1677,31 +1646,40 @@ return projectSkyPoint(az, alt, proj, this.horizonM(cfg));
         pts.push(this.projectSky(az, elev, cfg, proj));
       }
     } else {
-      const brg = destAz * (Math.PI / 180);
-      const stepM = this.horizonM(cfg) * 0.5;
-      const ahead = project(
-        {
-          east: v.sample.m.east + Math.sin(brg) * stepM,
-          north: v.sample.m.north + Math.cos(brg) * stepM,
-        },
-        proj,
-      );
-      const dx = ahead.x - v.p.x;
-      const dy = ahead.y - v.p.y;
-      const len = Math.hypot(dx, dy) || 1;
-      const L = Math.min(this.w, this.h) * 0.24;
-      pts.push({ x: v.p.x + (dx / len) * L, y: v.p.y + (dy / len) * L });
+      // Ground mode: great-circle arc from aircraft to destination.
+      const lat1 = ac.lat, lon1 = ac.lon;
+      const lat2 = ac.destLat, lon2 = ac.destLon;
+      const φ1 = lat1 * DEG, λ1 = lon1 * DEG;
+      const φ2 = lat2 * DEG, λ2 = lon2 * DEG;
+      const dφ = φ2 - φ1, dλ = λ2 - λ1;
+      const a = Math.sin(dφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(dλ / 2) ** 2;
+      const δ = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      if (δ < 1e-6) return;
+      const steps = 60;
+      for (let i = 0; i <= steps; i++) {
+        const f = i / steps;
+        const A = Math.sin((1 - f) * δ) / Math.sin(δ);
+        const B = Math.sin(f * δ) / Math.sin(δ);
+        const x = A * Math.cos(φ1) * Math.cos(λ1) + B * Math.cos(φ2) * Math.cos(λ2);
+        const y = A * Math.cos(φ1) * Math.sin(λ1) + B * Math.cos(φ2) * Math.sin(λ2);
+        const z = A * Math.sin(φ1) + B * Math.sin(φ2);
+        const latI = Math.atan2(z, Math.sqrt(x * x + y * y)) / DEG;
+        const lonI = Math.atan2(y, x) / DEG;
+        const m = llToMeters(latI, lonI, cfg.centerLat, cfg.centerLon);
+        pts.push(project(this.relativeToFollow(m), proj));
+      }
     }
 
+    const ctx = this.ctx;
     ctx.save();
     ctx.strokeStyle = rgba(v.color, 0.18 * v.alpha);
     ctx.lineWidth = 1.4;
     ctx.setLineDash([3, 8]);
     ctx.beginPath();
     ctx.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i <= steps; i++) {
-      // Prevent drawing horizontal lines across the entire screen if it wraps the antimeridian
-      if (Math.abs(pts[i].x - pts[i-1].x) > this.w / 2) {
+    for (let i = 1; i < pts.length; i++) {
+      // Prevent drawing a horizontal line across the screen at the antimeridian.
+      if (Math.abs(pts[i].x - pts[i - 1].x) > this.w / 2) {
         ctx.stroke();
         ctx.beginPath();
         ctx.moveTo(pts[i].x, pts[i].y);
