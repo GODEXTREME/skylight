@@ -6,9 +6,23 @@ dist/
 server/data/
 data/
 
+# deployment notes with LAN addresses / household-specific details — never commit
+HANDOFF.md
+
+# local scratch
+.cam-explore.mjs
+core.*
+
 # editor / OS
 .DS_Store
 .env
 .env.local
 .idea/
 .vscode/
+
+
+# downloaded vision models (fetched at setup, not committed)
+tracker/models/
+
+# local harness state
+.claude/

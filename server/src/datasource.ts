@@ -61,8 +61,6 @@ async function fetchJson(url: string, timeoutMs: number): Promise<any> {
 
 export interface PollerOptions {
   source: DataSource;
-  /** dump1090 aircraft.json URL (radio source). */
-  radioUrl: string;
   /** airplanes.live point template, {lat}/{lon}/{r} are filled from config. */
   apiUrlTemplate: string;
   pollMs: number;
@@ -150,16 +148,14 @@ export class Poller {
   setSource(source: DataSource): void {
     this.o.source = source;
     this.status.source = source;
+    this.syncApiTimer();
   }
 
   start(): void {
     if (this.timer) return;
     void this.tick();
     this.timer = setInterval(() => void this.tick(), this.o.pollMs);
-    if (this.o.supplementApi) {
-      void this.refreshApi();
-      this.apiTimer = setInterval(() => void this.refreshApi(), this.o.apiPollMs);
-    }
+    this.syncApiTimer();
   }
   stop(): void {
     if (this.timer) clearInterval(this.timer);
@@ -168,12 +164,32 @@ export class Poller {
     this.apiTimer = null;
   }
 
+  /**
+   * The supplement timer should only run when the radio is primary — it exists
+   * to keep landing aircraft alive when local ADS-B drops them. When the API is
+   * itself the primary source, `tick()` already polls it, so a second timer just
+   * doubles the request rate into airplanes.live's rate limit (429s there make
+   * polls fail, the display extrapolates, then drops aircraft — the "planes
+   * disappearing and reappearing" in #15). Reconcile it against the live source.
+   */
+  private syncApiTimer(): void {
+    const want = this.o.source === "radio" && this.o.supplementApi;
+    if (want && !this.apiTimer && this.timer) {
+      void this.refreshApi();
+      this.apiTimer = setInterval(() => void this.refreshApi(), this.o.apiPollMs);
+    } else if (!want && this.apiTimer) {
+      clearInterval(this.apiTimer);
+      this.apiTimer = null;
+      this.lastApi = [];
+    }
+  }
+
   private async fetchList(source: DataSource, now: number): Promise<Aircraft[] | null> {
     // Timeout = 80% of poll interval, capped at 4 s. Prevents fetch pile-up
     // when the source is slow (e.g. Pi SDR under load).
     const timeoutMs = Math.min(4000, this.o.pollMs * 0.8);
     try {
-      const url = source === "radio" ? this.o.radioUrl : this.buildApiUrl();
+      const url = source === "radio" ? this.o.getConfig().radioUrl : this.buildApiUrl();
       const json = await fetchJson(url, timeoutMs);
       const payload = json.aircraft ?? json.ac;
       if (!Array.isArray(payload)) throw new Error("malformed aircraft payload");

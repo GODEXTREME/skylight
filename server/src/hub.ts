@@ -17,6 +17,9 @@ export interface HubDeps {
   store: ConfigStore;
   getSnapshot: () => { now: number; aircraft: Aircraft[] };
   getStatus: () => SourceStatus;
+  /** Browser Origin check — defends against cross-site WebSocket hijack.
+   *  Receives the raw Origin header value (undefined for non-browser clients). */
+  isOriginAllowed?: (origin: string | undefined) => boolean;
 }
 
 export class Hub {
@@ -28,15 +31,16 @@ export class Hub {
   private static readonly MAX_CLIENTS = 32;
 
   constructor(server: Server, private deps: HubDeps) {
+    const allowOrigin = deps.isOriginAllowed ?? (() => true);
     this.wss = new WebSocketServer({
       server,
       path: "/ws",
-      verifyClient: ({ origin, req }: { origin: string; req: IncomingMessage }) => {
-        if (!origin) return true;
-        try {
-          return new URL(origin).hostname === req.headers.host?.split(":")[0];
-        } catch {
-          return false;
+      verifyClient: (info, cb) => {
+        const origin = info.origin || info.req.headers.origin;
+        if (allowOrigin(origin as string | undefined)) {
+          cb(true);
+        } else {
+          cb(false, 403, "Forbidden: Origin not in allowlist");
         }
       },
     });
@@ -83,11 +87,11 @@ export class Hub {
   private applyMessage(ws: WebSocket, msg: ClientMessage): void {
     switch (msg.type) {
       case "patchConfig":
-        this.deps.store.patch(msg.patch);
+        this.writeConfig(ws, () => this.deps.store.patch(msg.patch));
         this.ack(ws, msg.requestId);
         break;
       case "setConfig":
-        this.deps.store.set(msg.config);
+        this.writeConfig(ws, () => this.deps.store.set(msg.config));
         this.ack(ws, msg.requestId);
         break;
       case "resetConfig":
@@ -138,6 +142,18 @@ export class Hub {
   }
   broadcastConfig(config: Config): void {
     this.broadcast({ type: "config", config });
+  }
+
+  private writeConfig(ws: WebSocket, write: () => void): void {
+    try {
+      write();
+    } catch (err) {
+      if (err instanceof ConfigValidationError) {
+        this.send(ws, { type: "config", config: this.deps.store.get() });
+        return;
+      }
+      throw err;
+    }
   }
 
   private broadcast(msg: ServerMessage): void {

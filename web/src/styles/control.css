@@ -173,6 +173,88 @@ main {
   text-align: right;
 }
 
+/* Saved location profiles */
+.profile-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.profile-chip.on {
+  border-color: var(--accent);
+}
+.profile-chip .profile-name {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 7px 4px 7px 12px;
+  cursor: pointer;
+}
+.profile-chip.on .profile-name {
+  color: var(--text);
+}
+.profile-chip .profile-del {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  padding: 7px 10px 7px 6px;
+  cursor: pointer;
+}
+.profile-chip .profile-del:hover {
+  color: var(--bad);
+}
+
+/* Text input */
+.text-input {
+  width: clamp(180px, 48vw, 360px);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 8px 10px;
+  outline: none;
+}
+.text-input:focus {
+  border-color: var(--accent);
+}
+
+.loc-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.loc-bar .text-input {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+.loc-btn {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.loc-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.loc-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 /* Segmented */
 .segmented {
   display: flex;

@@ -6,6 +6,28 @@ import { dirname } from "node:path";
 import { DEFAULT_CONFIG, mergeConfig, validateConfigPatch, type Config } from "@shared/index.js";
 
 type Listener = (config: Config) => void;
+const RADIO_URL_ERROR = "radioUrl must be an http or https URL";
+
+function validateRadioUrl(radioUrl: unknown): void {
+  if (typeof radioUrl !== "string") {
+    throw new ConfigValidationError(RADIO_URL_ERROR);
+  }
+
+  try {
+    const { protocol } = new URL(radioUrl);
+    if (protocol === "http:" || protocol === "https:") return;
+  } catch {
+    // Fall through to the common validation error.
+  }
+
+  throw new ConfigValidationError(RADIO_URL_ERROR);
+}
+
+function validateConfigWrite(config: Partial<Config>): void {
+  if (config && Object.prototype.hasOwnProperty.call(config, "radioUrl")) {
+    validateRadioUrl(config.radioUrl);
+  }
+}
 
 export class ConfigValidationError extends Error {
   constructor(readonly errors: string[]) {
@@ -19,7 +41,12 @@ export class ConfigStore {
   private listeners = new Set<Listener>();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(private path: string) {}
+  constructor(
+    private path: string,
+    private defaults: Config = DEFAULT_CONFIG,
+  ) {
+    this.config = defaults;
+  }
 
   async load(): Promise<void> {
     try {
@@ -60,7 +87,7 @@ export class ConfigStore {
   }
 
   reset(): Config {
-    this.config = DEFAULT_CONFIG;
+    this.config = this.defaults;
     this.emit();
     this.scheduleSave();
     return this.config;

@@ -3,7 +3,7 @@
 Turn a freshly-flashed Raspberry Pi OS card into the Skylight appliance. Tested on a
 **Raspberry Pi 5** with **Raspberry Pi OS Bookworm (64-bit, Desktop)**.
 
-## 1. Provision the card (headless WiFi + SSH) — on your computer
+## 1. Provision the card (headless WiFi + SSH) - on your computer
 
 Flash Raspberry Pi OS (Desktop) to the card. With the card's **boot** partition mounted
 (e.g. at `/mnt/sdboot`):
@@ -17,7 +17,7 @@ sudo BOOT_MNT=/mnt/sdboot \
 ```
 
 This writes `custom.toml` (processed on first boot) + an `ssh` flag file, and prints a
-random console/sudo password — **save it**. SSH is key-only by default (use a
+random console/sudo password - **save it**. SSH is key-only by default (use a
 passphrase-less key, or load yours into an agent, so unattended `rsync`/deploy works).
 
 Eject, boot the Pi, wait ~60–90 s, then:
@@ -30,7 +30,7 @@ ssh pi@skylight.local        # or ssh pi@<pi-ip>
 > passphrase-less deploy key and authorize it, or set `password_authentication = true`
 > for first setup. Local-network convenience vs. security is your call.
 
-## 2. Install the appliance — on the Pi
+## 2. Install the appliance - on the Pi
 
 Copy the repo to the Pi and run the installer:
 
@@ -44,14 +44,14 @@ Installs the rtl-sdr-blog V4 driver (+ DVB-T blacklist), dump1090-fa, Node + pnp
 builds the app, and enables the `skylight-server` service. **Verify decode first** with
 `rtl_test -t` and `curl -s localhost:8080/aircraft.json | head` before moving on.
 
-## 3. Kiosk display — on the Pi
+## 3. Kiosk display - on the Pi
 
 ```bash
 ./pi-setup/setup-kiosk.sh
 sudo reboot
 ```
 
-Chromium opens full-screen on the display page at boot (via Xwayland — the native
+Chromium opens full-screen on the display page at boot (via Xwayland - the native
 Wayland GPU path crashes on the Pi 5), cursor hidden, screen blanking off.
 
 > **No HDMI signal?** The Pi 5 turns HDMI off when nothing is connected at boot and
@@ -63,7 +63,7 @@ Wayland GPU path crashes on the Pi 5), cursor hidden, screen blanking off.
 
 From your phone open `http://skylight.local:3000/control` and tune **rotation** + **mirror**
 against a real overhead pass until the ceiling tracks the sky (it's a calibration, not a
-formula — you're projecting up and looking up).
+formula - you're projecting up and looking up).
 
 ## Pushing updates
 

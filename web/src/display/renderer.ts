@@ -7,6 +7,12 @@
 // removes the once-per-second "snap" you get from naive dead-reckoning. The small
 // added latency is irrelevant for an ambient ceiling piece.
 //
+// Sky projection (projectionMode = "sky"): each fix is converted from ground
+// position + altitude to azimuth/elevation on a look-up hemisphere (zenith =
+// center, horizon = edge). Interpolation happens in ground space, then the
+// trig mapping runs every frame so apparent angular speed matches lying outside
+// and watching the real sky — fast overhead, slow at the horizon.
+//
 // Visual language: pure black, luminous altitude-graded glyphs, comet trails that
 // taper and fade, and restrained typography that fades in only for the nearest few.
 
@@ -17,11 +23,20 @@ import {
   deadReckon,
   rangeMeters,
   metersToMiles,
+  formatSpeed,
+  horizonRadiusM,
+  groundToSkyAngles,
+  projectAircraft,
+  projectSkyPoint,
+  skyGlyphScale,
+  lerpAzimuth,
   EMERGENCY_SQUAWKS,
   type Aircraft,
   type Config,
+  type GroundSample,
   type Meters,
   type Point,
+  type SkyAngles,
 } from "@shared/index.js";
 import { AIRPORTS, getAirportRevision, type Airport, type AirportArea } from "./airports.js";
 import { classifyGlyph, drawAircraftGlyph, GLYPH_SCALE } from "./aircraftGlyph.js";
@@ -33,6 +48,15 @@ import { WeatherRadar } from "./weather.js";
 /** How far in the past we render, ms. Starts at 1.15× the default poll cadence
  *  and is updated at runtime from the server's reported pollMs. */
 const DEFAULT_RENDER_DELAY_MS = 1150;
+
+/** Characteristic tints for the naked-eye planets, as "r,g,b". */
+const PLANET_COLORS: Record<string, string> = {
+  Venus: "255,244,214",
+  Jupiter: "245,226,184",
+  Mars: "232,131,90",
+  Saturn: "232,217,160",
+  Mercury: "200,192,176",
+};
 
 interface Sample {
   t: number; // performance.now() at arrival
@@ -149,7 +173,8 @@ const rgba = (c: [number, number, number], a: number) =>
 
 interface Visible {
   tr: Track;
-  m: Meters;
+  sample: GroundSample;
+  sky: SkyAngles | null;
   p: Point;
   heading: number;
   rangeMi: number;
@@ -168,6 +193,7 @@ export interface AircraftHit {
   x: number;
   y: number;
   followed: boolean;
+  sizeScale: number;
 }
 
 export class Renderer {
@@ -536,7 +562,6 @@ export class Renderer {
     if (tt <= h.at(0).t) return toM(h.at(0));
     const lastS = h.at(h.length - 1);
     if (tt >= lastS.t) {
-      // Beyond newest fix — extrapolate gently, capped.
       const dt = Math.min((tt - lastS.t) / 1000, cfg.maxExtrapolationSec);
       const m = toM(lastS);
       return cfg.interpolate ? deadReckon(m, lastS.track, lastS.gs, dt) : m;
@@ -702,6 +727,8 @@ export class Renderer {
       const alt = tr.ac.altBaro ?? tr.ac.altGeom ?? 0;
       const color = cfg.altitudeColor ? altRamp(alt) : hexToRgb(cfg.palette.glyph);
       const emergency = cfg.highlightEmergency && !!tr.ac.squawk && EMERGENCY_SQUAWKS.has(tr.ac.squawk);
+      const sizeScale =
+        cfg.projectionMode === "sky" && sky ? skyGlyphScale(sky.slantM) : 1;
 
       // ── Alert detection (fires once per hex per session) ──────────────────
       if (!this.alertedHexes.has(hex)) {
@@ -821,8 +848,8 @@ export class Renderer {
     const a = this.sampleAt(tr, tt - 150, cfg);
     const b = this.sampleAt(tr, tt + 150, cfg);
     if (a && b) {
-      const pa = project(a, proj);
-      const pb = project(b, proj);
+      const pa = this.toPoint(a, cfg, proj, tr);
+      const pb = this.toPoint(b, cfg, proj, tr);
       if (Math.hypot(pb.x - pa.x, pb.y - pa.y) > 0.5) {
         return Math.atan2(pb.y - pa.y, pb.x - pa.x);
       }
@@ -843,20 +870,44 @@ export class Renderer {
     const ctx = this.ctx;
     const cx = this.w / 2;
     const cy = this.h / 2;
+    const hM = this.horizonM(cfg);
+    const skyMode = cfg.projectionMode === "sky";
 
     if (cfg.rangeRings) {
       ctx.save();
-      for (let mi = 1; mi <= Math.floor(cfg.radiusMiles); mi++) {
-        const r = mi * 1609.34 * proj.pxPerM;
-        ctx.beginPath();
-        ctx.arc(cx, cy, r, 0, Math.PI * 2);
-        ctx.strokeStyle = rgba(hexToRgb(cfg.palette.grid), 0.5 * cfg.brightness);
-        ctx.lineWidth = 1;
-        ctx.setLineDash([2, 7]);
-        ctx.stroke();
+      if (skyMode) {
+        // Elevation contours on the look-up dome (15° … 75° above horizon).
+        for (const elev of [15, 30, 45, 60, 75]) {
+          const r = (1 - elev / 90) * hM * proj.pxPerM;
+          ctx.beginPath();
+          ctx.arc(cx, cy, r, 0, Math.PI * 2);
+          ctx.strokeStyle = rgba(hexToRgb(cfg.palette.grid), (0.22 + elev / 300) * cfg.brightness);
+          ctx.lineWidth = 1;
+          ctx.setLineDash(elev === 45 ? [] : [2, 8]);
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
+        ctx.font = `300 9px ${cfg.fonts.mono}`;
+        ctx.fillStyle = rgba(hexToRgb(cfg.palette.text), 0.22 * cfg.brightness);
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        for (const elev of [30, 60]) {
+          const r = (1 - elev / 90) * hM * proj.pxPerM;
+          ctx.fillText(`${elev}°`, cx + r + 4, cy);
+        }
+      } else {
+        for (let mi = 1; mi <= Math.floor(cfg.radiusMiles); mi++) {
+          const r = mi * 1609.34 * proj.pxPerM;
+          ctx.beginPath();
+          ctx.arc(cx, cy, r, 0, Math.PI * 2);
+          ctx.strokeStyle = rgba(hexToRgb(cfg.palette.grid), 0.5 * cfg.brightness);
+          ctx.lineWidth = 1;
+          ctx.setLineDash([2, 7]);
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
       }
-      ctx.setLineDash([]);
-      // Center mark.
+      // Zenith mark.
       ctx.beginPath();
       ctx.arc(cx, cy, 2, 0, Math.PI * 2);
       ctx.fillStyle = rgba(hexToRgb(cfg.palette.grid), 0.7 * cfg.brightness);
@@ -866,7 +917,6 @@ export class Renderer {
 
     if (cfg.compass) {
       ctx.save();
-      const R = (Math.min(this.w, this.h) / 2) * 0.965;
       ctx.font = `300 12px ${cfg.fonts.label}`;
       ctx.fillStyle = rgba(hexToRgb(cfg.palette.text), 0.32 * cfg.brightness);
       ctx.textAlign = "center";
@@ -877,11 +927,15 @@ export class Renderer {
         /* older browsers */
       }
       for (const [label, deg] of [["N", 0], ["E", 90], ["S", 180], ["W", 270]] as [string, number][]) {
-        const dir: Meters = {
-          east: Math.sin((deg * Math.PI) / 180) * 1e6,
-          north: Math.cos((deg * Math.PI) / 180) * 1e6,
-        };
-        const p = project(dir, { ...proj, pxPerM: R / 1e6 });
+        const p = skyMode
+          ? projectSkyPoint(deg, 1.5, proj, hM)
+          : project(
+              {
+                east: Math.sin((deg * Math.PI) / 180) * 1e6,
+                north: Math.cos((deg * Math.PI) / 180) * 1e6,
+              },
+              { ...proj, pxPerM: (Math.min(this.w, this.h) / 2) * 0.965 / 1e6 },
+            );
         this.withLabelRotation(cfg, p.x, p.y, () => ctx.fillText(label, p.x, p.y));
       }
       try {
@@ -1212,11 +1266,19 @@ export class Renderer {
       this.followOffset = { east: 0, north: 0 };
       this.followVelocity = { east: 0, north: 0 };
     }
+
+  private toScreen(ll: [number, number], cfg: Config, proj: ProjOpts, altFt = 0): Point {
+    const sample: GroundSample = {
+      m: llToMeters(ll[0], ll[1], cfg.centerLat, cfg.centerLon),
+      altFt,
+    };
+    return this.toPoint(sample, cfg, proj);
   }
 
   // --- sky layer (sun / moon / stars / satellites) ---
   private updateSky(cfg: Config, now: number): void {
-    const want = cfg.showStars || cfg.showSun || cfg.showMoon || cfg.showSatellites;
+    const want =
+      cfg.showStars || cfg.showSun || cfg.showMoon || cfg.showSatellites || cfg.showPlanets;
     if (!want) {
       this.sky = { stars: [], sats: [], planets: [] };
       return;
@@ -1230,6 +1292,7 @@ export class Renderer {
       moon: cfg.showMoon,
       stars: cfg.showStars,
       satellites: cfg.showSatellites,
+      planets: cfg.showPlanets,
       magLimit: cfg.starMagLimit,
       tles: this.tles,
     });
@@ -1238,6 +1301,8 @@ export class Renderer {
   /** Place an (azimuth, altitude) sky point on the field. Zenith=center, horizon=edge.
    *  Applies relativeToFollow so the sky shifts correctly in follow/pan mode. */
   private projectSky(az: number, alt: number, cfg: Config, proj: ProjOpts): Point {
+return projectSkyPoint(az, alt, proj, this.horizonM(cfg));
+
     const R = cfg.radiusMiles * 1609.34;
     const r = (1 - Math.max(0, alt) / 90) * R;
     const a = (az * Math.PI) / 180;
@@ -1327,7 +1392,7 @@ export class Renderer {
         }
         ctx.fill();
         ctx.shadowBlur = 0;
-        if (mag < 0.3 && s.name) this.skyLabel(p, s.name, cfg, 0.5 * b);
+        if (mag < cfg.starLabelMagLimit && s.name) this.skyLabel(p, s.name, cfg, 0.5 * b);
       }
     }
 
@@ -1356,8 +1421,27 @@ export class Renderer {
     if (cfg.showSun && this.sky.sun && this.sky.sun.alt > -2) {
       this.drawSun(this.projectSky(this.sky.sun.az, this.sky.sun.alt, cfg, proj), b);
     }
-    
-    let issCurrentlyVisible = false;
+    if (cfg.showPlanets && this.sky.planets.length) {
+      for (const pl of this.sky.planets) {
+        const p = this.projectSky(pl.az, pl.alt, cfg, proj);
+        const mag = pl.mag ?? 1;
+        // Brighter planets (lower magnitude) read larger, with a soft glow.
+        const size = Math.max(1.6, Math.min(4, 3 - mag * 0.5));
+        const col = PLANET_COLORS[pl.name ?? ""] ?? "230,224,205";
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${col},${0.95 * b})`;
+        if (mag < 0.5) {
+          ctx.shadowColor = `rgba(${col},${b})`;
+          ctx.shadowBlur = size * 2.5;
+        }
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        if (pl.name) {
+          this.skyLabel({ x: p.x + 6, y: p.y - 6 }, pl.name, cfg, 0.7 * b, `rgb(${col})`);
+        }
+      }
+    }
     if (cfg.showSatellites && this.sky.sats.length) {
       const now = performance.now();
       for (const sat of this.sky.sats) {
@@ -1403,7 +1487,11 @@ export class Renderer {
         }
         ctx.fill();
         ctx.shadowBlur = 0;
-        if (iss) this.skyLabel({ x: p.x + 6, y: p.y - 6 }, "ISS", cfg, 0.9 * b, "#8CFFD6");
+        if (iss) {
+          this.skyLabel({ x: p.x + 6, y: p.y - 6 }, "ISS", cfg, 0.9 * b, "#8CFFD6");
+        } else if (cfg.satelliteLabels && sat.name) {
+          this.skyLabel({ x: p.x + 5, y: p.y - 5 }, sat.name, cfg, 0.6 * b);
+        }
       }
     }
     this.issVisible = issCurrentlyVisible;
@@ -1519,6 +1607,36 @@ export class Renderer {
     }
 
     const ctx = this.ctx;
+    const destAz = bearing(ac.lat, ac.lon, ac.destLat, ac.destLon);
+    const pts: Point[] = [v.p];
+
+    if (cfg.projectionMode === "sky" && v.sky) {
+      // Curve along the dome from the aircraft's sky position toward the
+      // destination azimuth at the horizon — a realistic look-up great-circle hint.
+      const steps = 10;
+      for (let i = 1; i <= steps; i++) {
+        const f = i / steps;
+        const az = lerpAzimuth(v.sky.az, destAz, f);
+        const elev = v.sky.elev * (1 - f * f);
+        pts.push(this.projectSky(az, elev, cfg, proj));
+      }
+    } else {
+      const brg = destAz * (Math.PI / 180);
+      const stepM = this.horizonM(cfg) * 0.5;
+      const ahead = project(
+        {
+          east: v.sample.m.east + Math.sin(brg) * stepM,
+          north: v.sample.m.north + Math.cos(brg) * stepM,
+        },
+        proj,
+      );
+      const dx = ahead.x - v.p.x;
+      const dy = ahead.y - v.p.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const L = Math.min(this.w, this.h) * 0.24;
+      pts.push({ x: v.p.x + (dx / len) * L, y: v.p.y + (dy / len) * L });
+    }
+
     ctx.save();
     ctx.strokeStyle = rgba(v.color, 0.18 * v.alpha);
     ctx.lineWidth = 1.4;
@@ -1725,7 +1843,7 @@ export class Renderer {
     const ctx = this.ctx;
     const color = v.emergency ? hexToRgb(cfg.palette.warn) : v.color;
     const kind = classifyGlyph(v.tr.ac);
-    const s = cfg.glyphSizePx * GLYPH_SCALE[kind];
+    const s = cfg.glyphSizePx * GLYPH_SCALE[kind] * v.sizeScale;
 
     ctx.save();
     ctx.translate(v.p.x, v.p.y);
@@ -1849,7 +1967,7 @@ export class Renderer {
     if (f.altitude) {
       sub.push(formatAltitudeLabel(ac));
     }
-    if (f.speed && ac.gs != null) sub.push(`${Math.round(ac.gs)} kt`);
+    if (f.speed && ac.gs != null) sub.push(formatSpeed(ac.gs, cfg.speedUnit));
     if (sub.length) out.push({ text: sub.join("   "), kind: "sub" });
 
     if (f.destination && ac.destination && routePlausible(ac, cfg)) {

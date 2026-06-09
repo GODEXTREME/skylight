@@ -913,7 +913,7 @@ export function Display() {
           <span>
             {state.status?.source ?? "—"} · {state.aircraft.length} ac ·{" "}
             rot {cfg.rotationDeg}° · mirror {cfg.mirrorX ? "X" : "–"}
-            {cfg.mirrorY ? "Y" : ""} · r {cfg.radiusMiles}mi · {cfg.theme}
+            {cfg.mirrorY ? "Y" : ""} · r {cfg.radiusMiles}mi · {cfg.projectionMode} · {cfg.theme}
             {rendererStats.estimated > 0 && ` · ${rendererStats.estimated} est`}
             {rendererStats.stale > 0 && ` · ${rendererStats.stale} stale`}
             {cfg.followFlightHex &&

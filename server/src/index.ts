@@ -5,15 +5,17 @@
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import express from "express";
-import type { DataSource } from "@shared/index.js";
+import { DEFAULT_CONFIG, type Config, type DataSource } from "@shared/index.js";
 import { ConfigStore, ConfigValidationError } from "./config-store.js";
 import { RouteEnricher } from "./enrich/routes.js";
 import { Poller } from "./datasource.js";
 import { Hub } from "./hub.js";
 import { TleStore } from "./tle.js";
 import { FlightStats } from "./stats.js";
+import { resolveLocation } from "./geocode.js";
+import { buildHostMatcher, originHostname } from "./allowed-hosts.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = resolve(__dirname, "../data");
@@ -31,10 +33,29 @@ const ROUTE_CACHE_HOURS = Number(process.env.ROUTE_CACHE_HOURS ?? 12);
 // When on radio, also poll the API and merge (keeps landing aircraft alive).
 const SUPPLEMENT_API = (process.env.SUPPLEMENT_API ?? "1") !== "0";
 const API_POLL_MS = Number(process.env.API_POLL_MS ?? 4000);
+// Nominatim asks for a descriptive User-Agent identifying the application.
+const GEOCODE_UA =
+  process.env.GEOCODE_USER_AGENT ??
+  "skylight/0.1 (https://github.com/cpaczek/skylight)";
+const CONFIG_PATH = resolve(DATA_DIR, "config.json");
+const SERVER_DEFAULT_CONFIG: Config = { ...DEFAULT_CONFIG, radioUrl: RADIO_URL };
+
+function hasPersistedRadioUrl(path: string): boolean {
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<Config>;
+    return typeof raw.radioUrl === "string";
+  } catch {
+    return false;
+  }
+}
 
 async function main(): Promise<void> {
-  const store = new ConfigStore(resolve(DATA_DIR, "config.json"));
+  const configHasRadioUrl = hasPersistedRadioUrl(CONFIG_PATH);
+  const store = new ConfigStore(CONFIG_PATH, SERVER_DEFAULT_CONFIG);
   await store.load();
+  if (!configHasRadioUrl && store.get().radioUrl !== RADIO_URL) {
+    store.patch({ radioUrl: RADIO_URL });
+  }
 
   const enricher = new RouteEnricher(
     resolve(DATA_DIR, "route-cache.json"),
@@ -50,10 +71,8 @@ async function main(): Promise<void> {
 
   const server = createServer(app);
   const stats = new FlightStats();
-  let hub: Hub;
   const poller = new Poller({
     source: SOURCE,
-    radioUrl: RADIO_URL,
     apiUrlTemplate: API_URL,
     pollMs: POLL_MS,
     supplementApi: SUPPLEMENT_API,
@@ -66,12 +85,6 @@ async function main(): Promise<void> {
     },
     onStatus: (status) => hub.broadcastStatus(status),
   });
-  hub = new Hub(server, {
-    store,
-    getSnapshot: () => poller.getSnapshot(),
-    getStatus: () => poller.getStatus(),
-  });
-
   // --- REST API (handy for debugging + non-WS clients) ---
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
   app.get("/api/config", (_req, res) => res.json(store.get()));
@@ -136,6 +149,20 @@ async function main(): Promise<void> {
     poller.setSource(s);
     res.json(poller.getStatus());
   });
+  // Resolve a place name / "lat,lon" / airport code to coordinates for the
+  // control panel's location editor. Never invents a fallback: a miss is a 404,
+  // so the caller never silently relocates to 0,0.
+  app.get("/api/geocode", async (req, res) => {
+    const q = String(req.query.q ?? "").trim();
+    if (!q) return res.status(400).json({ error: "missing query parameter q" });
+    try {
+      const hit = await resolveLocation(q, { userAgent: GEOCODE_UA });
+      if (!hit) return res.status(404).json({ error: `no match for "${q}"` });
+      res.json(hit);
+    } catch {
+      res.status(502).json({ error: "geocoding service unavailable" });
+    }
+  });
 
   // --- static web (production build) ---
   if (existsSync(WEB_DIST)) {
@@ -158,6 +185,7 @@ async function main(): Promise<void> {
     console.log(`[server] listening on http://${HOST}:${PORT}`);
     console.log(`[server] data source: ${SOURCE} (${SOURCE === "radio" ? RADIO_URL : API_URL})`);
     console.log(`[server] control panel: http://<this-host>:${PORT}/control`);
+    console.log(`[server] host allowlist: ${hostMatcher.describe()}`);
   });
 
   const shutdown = () => {

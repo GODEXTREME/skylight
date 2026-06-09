@@ -1,6 +1,6 @@
 // Small, touch-friendly control primitives for the phone settings panel.
 
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 export function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -66,6 +66,49 @@ export function Slider({
         {unit}
       </span>
     </div>
+  );
+}
+
+export function TextInput({
+  value,
+  onCommit,
+  placeholder,
+  ariaLabel,
+}: {
+  value: string;
+  /** Fired on blur / Enter with the trimmed value (only when it changed). */
+  onCommit: (v: string) => void;
+  placeholder?: string;
+  ariaLabel?: string;
+}) {
+  const [draft, setDraft] = useState(value);
+  // Re-sync when the server's value changes (e.g. a rejected edit reverts).
+  useEffect(() => setDraft(value), [value]);
+
+  const commit = () => {
+    const trimmed = draft.trim();
+    if (trimmed !== draft) setDraft(trimmed);
+    if (trimmed !== value) onCommit(trimmed);
+  };
+
+  return (
+    <input
+      className="text-input"
+      type="text"
+      inputMode="url"
+      value={draft}
+      placeholder={placeholder}
+      aria-label={ariaLabel}
+      spellCheck={false}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          e.currentTarget.blur();
+        }
+      }}
+    />
   );
 }
 

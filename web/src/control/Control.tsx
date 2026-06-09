@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Aircraft, Config, ShowFields } from "@shared/index.js";
+import type { Aircraft, Config, ShowFields, LocationProfile } from "@shared/index.js";
+import { formatLatLon } from "@shared/geo.js";
 import { useStream } from "../lib/useStream.js";
 import { nextISSPass, type Tle } from "../display/celestial.js";
-import { ColorRow, Row, Section, Segmented, Slider, Toggle } from "./components.js";
+import { ColorRow, Row, Section, Segmented, Slider, TextInput, Toggle } from "./components.js";
 import { PRESETS } from "./presets.js";
 import { LOCATION_PRESETS } from "./locationPresets.js";
 import { type City, prefetchCities, searchCities } from "../lib/cities.js";
@@ -642,6 +643,12 @@ export function Control() {
   }, []);
 
   // ISS pass finder.
+
+  // Location editor (Nominatim via the server's /api/geocode).
+  const [geoBusy, setGeoBusy] = useState(false);
+  const [geoErr, setGeoErr] = useState<string | null>(null);
+
+  // ISS pass finder (for the Sky section).
   const [tles, setTles] = useState<Tle[]>([]);
   useEffect(() => {
     let on = true;
@@ -671,6 +678,85 @@ export function Control() {
   const set = (patch: Partial<Config>) => conn.patchConfig(patch);
   const setField = (k: keyof ShowFields, v: boolean) =>
     conn.patchConfig({ showFields: { ...cfg.showFields, [k]: v } });
+  const statusMessage = state.status?.message ? ` · ${state.status.message}` : "";
+
+  const changeLocation = async (q: string) => {
+    if (!q.trim()) return;
+    setGeoBusy(true);
+    setGeoErr(null);
+    try {
+      const r = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
+      if (!r.ok) {
+        setGeoErr(r.status === 404 ? `No match for “${q}”` : "Lookup failed");
+        return;
+      }
+      const hit = (await r.json()) as { lat: number; lon: number; name: string };
+      set({ centerLat: hit.lat, centerLon: hit.lon, locationName: hit.name });
+    } catch {
+      setGeoErr("Lookup failed");
+    } finally {
+      setGeoBusy(false);
+    }
+  };
+
+  // --- saved location profiles (favorite airports) ---
+  const genId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const atCurrent = (p: { lat: number; lon: number }) =>
+    Math.abs(p.lat - cfg.centerLat) < 1e-4 && Math.abs(p.lon - cfg.centerLon) < 1e-4;
+  const switchToProfile = (p: LocationProfile) =>
+    set({ centerLat: p.lat, centerLon: p.lon, radiusMiles: p.radiusMiles, locationName: p.name });
+  const saveCurrentProfile = () => {
+    const name = cfg.locationName?.trim() || formatLatLon(cfg.centerLat, cfg.centerLon);
+    const profile: LocationProfile = {
+      id: genId(),
+      name,
+      lat: cfg.centerLat,
+      lon: cfg.centerLon,
+      radiusMiles: cfg.radiusMiles,
+    };
+    // Replace any existing profile already saved at this spot.
+    const rest = cfg.locationProfiles.filter((p) => !atCurrent(p));
+    set({ locationProfiles: [...rest, profile] });
+  };
+  const removeProfile = (id: string) =>
+    set({ locationProfiles: cfg.locationProfiles.filter((p) => p.id !== id) });
+  const centerOnTraffic = () => {
+    const ac = state.aircraft.filter((a) => a.lat != null && a.lon != null);
+    if (!ac.length) return;
+    const lat = ac.reduce((s, a) => s + (a.lat as number), 0) / ac.length;
+    const lon = ac.reduce((s, a) => s + (a.lon as number), 0) / ac.length;
+    set({ centerLat: lat, centerLon: lon, locationName: "Traffic center" });
+  };
+
+  const useCurrentLocation = () => {
+    if (!navigator.geolocation) {
+      setGeoErr("Geolocation not supported on this device");
+      return;
+    }
+    setGeoBusy(true);
+    setGeoErr(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        set({
+          centerLat: pos.coords.latitude,
+          centerLon: pos.coords.longitude,
+          locationName: "Current location",
+        });
+        setGeoBusy(false);
+      },
+      (err) => {
+        setGeoBusy(false);
+        const msg =
+          err.code === err.PERMISSION_DENIED
+            ? "Location permission denied"
+            : err.code === err.TIMEOUT
+              ? "Location request timed out"
+              : "Location unavailable";
+        setGeoErr(msg);
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60_000 },
+    );
+  };
 
   // Close detail popup if selected aircraft disappears from feed.
   const selectedStillPresent =
@@ -705,7 +791,7 @@ export function Control() {
           Ceiling Tracker
         </div>
         <div className="stat">
-          {state.status?.source ?? "—"} · {state.aircraft.length} overhead
+          {state.status?.source ?? "—"} · {state.aircraft.length} overhead{statusMessage}
         </div>
       </header>
 
@@ -791,6 +877,66 @@ export function Control() {
 
         <Section title="Location">
           <LocationSection cfg={cfg} onPatch={set} />
+
+        <Section title="Location">
+          <Row label={cfg.locationName || "Location"} hint={formatLatLon(cfg.centerLat, cfg.centerLon)}>
+            <div className="loc-bar">
+              <TextInput
+                key={cfg.locationName}
+                value=""
+                placeholder="city, airport, or lat,lon"
+                ariaLabel="Change location"
+                onCommit={changeLocation}
+              />
+              <button
+                type="button"
+                className="loc-btn"
+                aria-label="Use current location"
+                disabled={geoBusy}
+                onClick={useCurrentLocation}
+              >
+                Current
+              </button>
+            </div>
+          </Row>
+          {geoBusy && <Row label="" hint="resolving…"><span /></Row>}
+          {geoErr && <Row label="" hint={geoErr}><span /></Row>}
+          <div className="chips">
+            {cfg.locationProfiles.map((pr) => (
+              <span key={pr.id} className={`profile-chip ${atCurrent(pr) ? "on" : ""}`}>
+                <button className="profile-name" onClick={() => switchToProfile(pr)}>
+                  {pr.name}
+                </button>
+                <button
+                  className="profile-del"
+                  aria-label={`Delete ${pr.name}`}
+                  onClick={() => removeProfile(pr.id)}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            <button className="chip" onClick={saveCurrentProfile}>
+              + Save current
+            </button>
+            {state.aircraft.length > 0 && (
+              <button className="chip" onClick={centerOnTraffic}>
+                Center on traffic
+              </button>
+            )}
+          </div>
+        </Section>
+
+        <Section title="Source">
+          <Row label="Radio URL" hint="dump1090 aircraft.json">
+            <TextInput
+              value={cfg.radioUrl}
+              ariaLabel="Radio aircraft JSON URL"
+              onCommit={(v) => {
+                if (v !== cfg.radioUrl) set({ radioUrl: v });
+              }}
+            />
+          </Row>
         </Section>
 
         <Section title="Calibration">
@@ -807,6 +953,20 @@ export function Control() {
           <Row label="Label rotation" hint="text only, not the map">
             <Slider value={cfg.labelRotationDeg} min={0} max={355} step={5} unit="°"
               onChange={(v) => set({ labelRotationDeg: v })} />
+          </Row>
+          <Row label="Radius">
+            <Slider value={cfg.radiusMiles} min={0.5} max={10} step={0.5} unit="mi"
+              onChange={(v) => set({ radiusMiles: v })} />
+          </Row>
+          <Row label="Projection" hint="sky = realistic look-up motion">
+            <Segmented
+              value={cfg.projectionMode}
+              options={[
+                { value: "sky", label: "Sky" },
+                { value: "map", label: "Map" },
+              ]}
+              onChange={(v) => set({ projectionMode: v })}
+            />
           </Row>
         </Section>
 
@@ -857,6 +1017,15 @@ export function Control() {
                 onChange={(v) => set({ nearestN: v })} />
             </Row>
           )}
+          <Row label="Speed unit">
+            <Segmented value={cfg.speedUnit}
+              options={[
+                { value: "kt", label: "kt" },
+                { value: "mph", label: "mph" },
+                { value: "kmh", label: "km/h" },
+              ]}
+              onChange={(v) => set({ speedUnit: v })} />
+          </Row>
           <div className="chips">
             {(Object.keys(FIELD_LABELS) as (keyof ShowFields)[]).map((k) => (
               <button
@@ -931,7 +1100,7 @@ export function Control() {
           <Row label="Compass">
             <Toggle value={cfg.compass} onChange={(v) => set({ compass: v })} />
           </Row>
-          <Row label="Airport runways">
+          <Row label="Airport runways" hint="SFO geometry; off if you've moved">
             <Toggle value={cfg.showAirport} onChange={(v) => set({ showAirport: v })} />
           </Row>
           <Row label="Airspace sectors">
@@ -961,9 +1130,21 @@ export function Control() {
           <Row label="Satellites & ISS">
             <Toggle value={cfg.showSatellites} onChange={(v) => set({ showSatellites: v })} />
           </Row>
+          {cfg.showSatellites && (
+            <Row label="Satellite labels" hint="name every satellite">
+              <Toggle value={cfg.satelliteLabels} onChange={(v) => set({ satelliteLabels: v })} />
+            </Row>
+          )}
+          <Row label="Planets" hint="Venus, Jupiter, Mars…">
+            <Toggle value={cfg.showPlanets} onChange={(v) => set({ showPlanets: v })} />
+          </Row>
           <Row label="Star density">
             <Slider value={cfg.starMagLimit} min={1} max={4} step={0.1}
               onChange={(v) => set({ starMagLimit: v })} />
+          </Row>
+          <Row label="Star labels" hint="higher = more names">
+            <Slider value={cfg.starLabelMagLimit} min={0} max={3} step={0.1}
+              onChange={(v) => set({ starLabelMagLimit: v })} />
           </Row>
           <Row label="Sky time" hint={skyTimeLabel(cfg.skyTimeOffsetMin)}>
             <Slider value={cfg.skyTimeOffsetMin} min={-720} max={720} step={5} unit="m"
