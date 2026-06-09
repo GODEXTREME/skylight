@@ -226,8 +226,6 @@ export interface Config {
   followFlightHex: string;
   /** Show moving geographic grid and nearby city labels while following. */
   showFollowContext: boolean;
-  /** Saved places (airports/cities) switchable from the control panel. */
-  locationProfiles: LocationProfile[];
 
   // --- data source ---
   /** dump1090/readsb aircraft.json URL for the radio source. */
@@ -355,7 +353,6 @@ export const DEFAULT_CONFIG: Config = {
   locationProfiles: [],
   followFlightHex: "",
   showFollowContext: true,
-  locationProfiles: [],
 
   radioUrl: "http://localhost:8080/data/aircraft.json",
 
@@ -428,7 +425,6 @@ export const DEFAULT_CONFIG: Config = {
   showSatellites: true,
   satelliteLabels: false,
   starMagLimit: 3.5,
-  satelliteLabels: false,
   showPlanets: true,
   starLabelMagLimit: 0.3,
   skyTimeOffsetMin: 0,

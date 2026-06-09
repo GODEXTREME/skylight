@@ -181,8 +181,9 @@ const rgba = (c: [number, number, number], a: number) =>
 
 interface Visible {
   tr: Track;
-  sample: GroundSample;
+  m: Meters;
   sky: SkyAngles | null;
+  sizeScale: number;
   p: Point;
   heading: number;
   rangeMi: number;
@@ -201,7 +202,6 @@ export interface AircraftHit {
   x: number;
   y: number;
   followed: boolean;
-  sizeScale: number;
 }
 
 export class Renderer {
@@ -788,8 +788,7 @@ export class Renderer {
       const alt = tr.ac.altBaro ?? tr.ac.altGeom ?? 0;
       const color = cfg.altitudeColor ? altRamp(alt) : hexToRgb(cfg.palette.glyph);
       const emergency = cfg.highlightEmergency && !!tr.ac.squawk && EMERGENCY_SQUAWKS.has(tr.ac.squawk);
-      const sizeScale =
-        cfg.projectionMode === "sky" && sky ? skyGlyphScale(sky.slantM) : 1;
+      const sizeScale = 1;
 
       // ── Alert detection (fires once per hex per session) ──────────────────
       if (!this.alertedHexes.has(hex)) {
@@ -815,6 +814,8 @@ export class Renderer {
       visible.push({
         tr,
         m: relativeM,
+        sky: null,
+        sizeScale,
         p,
         heading,
         rangeMi,
@@ -909,8 +910,8 @@ export class Renderer {
     const a = this.sampleAt(tr, tt - 150, cfg);
     const b = this.sampleAt(tr, tt + 150, cfg);
     if (a && b) {
-      const pa = this.toPoint(a, cfg, proj, tr);
-      const pb = this.toPoint(b, cfg, proj, tr);
+      const pa = project(this.relativeToFollow(a), proj);
+      const pb = project(this.relativeToFollow(b), proj);
       if (Math.hypot(pb.x - pa.x, pb.y - pa.y) > 0.5) {
         return Math.atan2(pb.y - pa.y, pb.x - pa.x);
       }
@@ -1269,6 +1270,10 @@ export class Renderer {
   }
 
 
+  private horizonM(cfg: Config): number {
+    return cfg.radiusMiles * 1609.34;
+  }
+
   private relativeToFollow(m: Meters): Meters {
     return {
       east:  m.east  - this.followOffset.east  - this.panOffset.east,
@@ -1324,11 +1329,8 @@ export class Renderer {
   }
 
   private toScreen(ll: [number, number], cfg: Config, proj: ProjOpts, altFt = 0): Point {
-    const sample: GroundSample = {
-      m: llToMeters(ll[0], ll[1], cfg.centerLat, cfg.centerLon),
-      altFt,
-    };
-    return this.toPoint(sample, cfg, proj);
+    const m = llToMeters(ll[0], ll[1], cfg.centerLat, cfg.centerLon);
+    return project(this.relativeToFollow(m), proj);
   }
 
   // --- sky layer (sun / moon / stars / satellites) ---
@@ -1357,13 +1359,7 @@ export class Renderer {
   /** Place an (azimuth, altitude) sky point on the field. Zenith=center, horizon=edge.
    *  Applies relativeToFollow so the sky shifts correctly in follow/pan mode. */
   private projectSky(az: number, alt: number, cfg: Config, proj: ProjOpts): Point {
-return projectSkyPoint(az, alt, proj, this.horizonM(cfg));
-
-    const R = cfg.radiusMiles * 1609.34;
-    const r = (1 - Math.max(0, alt) / 90) * R;
-    const a = (az * Math.PI) / 180;
-    const m: Meters = { east: Math.sin(a) * r, north: Math.cos(a) * r };
-    return project(this.relativeToFollow(m), proj);
+    return projectSkyPoint(az, alt, proj, this.horizonM(cfg));
   }
 
   private issVisible = false;
@@ -1371,6 +1367,7 @@ return projectSkyPoint(az, alt, proj, this.horizonM(cfg));
   private drawSky(cfg: Config, proj: ProjOpts): void {
     const ctx = this.ctx;
     const b = cfg.brightness;
+    let issCurrentlyVisible = false;
 
     // Asterism lines (faint) — need star screen points by id.
     if (cfg.showStars && this.sky.stars.length) {
