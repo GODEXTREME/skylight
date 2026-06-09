@@ -439,13 +439,15 @@ function FlightSearch({
   );
 }
 
-/** Location section: city search + airport quick-picks + manual lat/lon. */
+/** Location section: geocode search + saved profiles + airport quick-picks + manual lat/lon. */
 function LocationSection({
   cfg,
   onPatch,
+  aircraft,
 }: {
   cfg: Config;
   onPatch: (patch: Partial<Config>) => void;
+  aircraft: Aircraft[];
 }) {
   const [lat, setLat] = useState(String(cfg.centerLat));
   const [lon, setLon] = useState(String(cfg.centerLon));
@@ -453,6 +455,7 @@ function LocationSection({
   const [cityQuery, setCityQuery] = useState("");
   const [cityResults, setCityResults] = useState<City[]>([]);
   const [searching, setSearching] = useState(false);
+  const [geoErr, setGeoErr] = useState<string | null>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Prefetch cities dataset as soon as this section mounts.
@@ -465,12 +468,14 @@ function LocationSection({
     setDirty(false);
   }, [cfg.centerLat, cfg.centerLon]);
 
-  const applyLocation = useCallback((newLat: number, newLon: number, newRadius?: number) => {
+  const applyLocation = useCallback((newLat: number, newLon: number, newRadius?: number, name?: string) => {
     const patch: Partial<Config> = { centerLat: newLat, centerLon: newLon };
     if (newRadius != null) patch.radiusMiles = newRadius;
+    if (name) patch.locationName = name;
     onPatch(patch);
     setCityQuery("");
     setCityResults([]);
+    setGeoErr(null);
   }, [onPatch]);
 
   const commitManual = () => {
@@ -483,9 +488,32 @@ function LocationSection({
     setDirty(false);
   };
 
-  // Debounced city search.
+  // Geocode search via server /api/geocode (Nominatim).
+  const handleGeoSearch = async (q: string) => {
+    const trimmed = q.trim();
+    if (!trimmed) return;
+    setSearching(true);
+    setGeoErr(null);
+    try {
+      const res = await fetch(`/api/geocode?q=${encodeURIComponent(trimmed)}`);
+      if (!res.ok) {
+        setGeoErr(res.status === 404 ? `No match for "${trimmed}"` : "Lookup failed");
+        return;
+      }
+      const hit = await res.json() as { lat: number; lon: number; name: string };
+      applyLocation(hit.lat, hit.lon, undefined, hit.name);
+      setCityQuery("");
+    } catch {
+      setGeoErr("Lookup failed");
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  // Debounced city search (local dataset).
   const handleCityInput = (q: string) => {
     setCityQuery(q);
+    setGeoErr(null);
     if (searchTimer.current) clearTimeout(searchTimer.current);
     if (q.trim().length < 2) { setCityResults([]); return; }
     setSearching(true);
@@ -496,35 +524,86 @@ function LocationSection({
     }, 200);
   };
 
+  // --- saved location profiles ---
+  const genId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const atCurrent = (p: LocationProfile) =>
+    Math.abs(p.lat - cfg.centerLat) < 1e-4 && Math.abs(p.lon - cfg.centerLon) < 1e-4;
+  const switchToProfile = (p: LocationProfile) =>
+    onPatch({ centerLat: p.lat, centerLon: p.lon, radiusMiles: p.radiusMiles, locationName: p.name });
+  const saveCurrentProfile = () => {
+    const name = cfg.locationName?.trim() || `${cfg.centerLat.toFixed(4)}, ${cfg.centerLon.toFixed(4)}`;
+    const profile: LocationProfile = {
+      id: genId(),
+      name,
+      lat: cfg.centerLat,
+      lon: cfg.centerLon,
+      radiusMiles: cfg.radiusMiles,
+    };
+    const rest = (cfg.locationProfiles ?? []).filter((p) => !atCurrent(p));
+    onPatch({ locationProfiles: [...rest, profile] });
+  };
+  const removeProfile = (id: string) =>
+    onPatch({ locationProfiles: (cfg.locationProfiles ?? []).filter((p) => p.id !== id) });
+  const centerOnTraffic = () => {
+    const ac = aircraft.filter((a) => a.lat != null && a.lon != null);
+    if (!ac.length) return;
+    const mlat = ac.reduce((s, a) => s + (a.lat as number), 0) / ac.length;
+    const mlon = ac.reduce((s, a) => s + (a.lon as number), 0) / ac.length;
+    onPatch({ centerLat: mlat, centerLon: mlon, locationName: "Traffic center" });
+  };
+
   return (
     <>
+      <Row label={cfg.locationName || "Location"} hint={`${cfg.centerLat.toFixed(4)}, ${cfg.centerLon.toFixed(4)}`}>
+        <span />
+      </Row>
       <Row label="Radius">
         <Slider value={cfg.radiusMiles} min={0.5} max={50} step={0.5} unit="mi"
           onChange={(v) => onPatch({ radiusMiles: v })} />
       </Row>
 
-      {/* City search */}
+      {/* Saved profiles */}
+      <div className="chips">
+        {(cfg.locationProfiles ?? []).map((pr) => (
+          <span key={pr.id} className={`profile-chip ${atCurrent(pr) ? "on" : ""}`}>
+            <button className="profile-name" onClick={() => switchToProfile(pr)}>
+              {pr.name}
+            </button>
+            <button className="profile-del" aria-label={`Delete ${pr.name}`} onClick={() => removeProfile(pr.id)}>
+              ×
+            </button>
+          </span>
+        ))}
+        <button className="chip" onClick={saveCurrentProfile}>+ Save current</button>
+        {aircraft.length > 0 && (
+          <button className="chip" onClick={centerOnTraffic}>Center on traffic</button>
+        )}
+      </div>
+
+      {/* Geocode / city search */}
       <div className="location-search">
         <div className="location-search-wrap">
           <input
             className="location-input location-search-input"
             type="text"
-            placeholder="Search city…"
+            placeholder="City, airport code, or lat,lon…"
             value={cityQuery}
             onChange={(e) => handleCityInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") handleGeoSearch(cityQuery); }}
             autoComplete="off"
             spellCheck={false}
           />
           {searching && <span className="location-search-spinner" />}
+          {cityQuery && !searching && (
+            <button className="flight-search-clear" onClick={() => { setCityQuery(""); setCityResults([]); setGeoErr(null); }}>✕</button>
+          )}
         </div>
+        {geoErr && <div className="city-no-results">{geoErr}</div>}
         {cityResults.length > 0 && (
           <ul className="city-results">
             {cityResults.map((c, i) => (
               <li key={i}>
-                <button
-                  className="city-result-btn"
-                  onClick={() => applyLocation(c.lat, c.lon)}
-                >
+                <button className="city-result-btn" onClick={() => applyLocation(c.lat, c.lon, undefined, c.name)}>
                   <span className="city-result-name">{c.name}</span>
                   {c.country && <span className="city-result-country">{c.country}</span>}
                 </button>
@@ -532,8 +611,14 @@ function LocationSection({
             ))}
           </ul>
         )}
-        {cityResults.length === 0 && cityQuery.trim().length >= 2 && !searching && (
-          <div className="city-no-results">No cities found — try the airport quick-picks or set coordinates manually</div>
+        {cityResults.length === 0 && cityQuery.trim().length >= 2 && !searching && !geoErr && (
+          <div className="city-no-results">
+            No local results —{" "}
+            <button style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", padding: 0 }}
+              onClick={() => handleGeoSearch(cityQuery)}>
+              search online
+            </button>
+          </div>
         )}
       </div>
 
@@ -548,7 +633,7 @@ function LocationSection({
             return (
               <button key={lp.code}
                 className={`chip ${active ? "on" : ""}`}
-                onClick={() => applyLocation(lp.lat, lp.lon, lp.radiusMiles)}
+                onClick={() => applyLocation(lp.lat, lp.lon, lp.radiusMiles, lp.name)}
                 title={lp.name}
               >
                 {lp.code}
@@ -876,67 +961,7 @@ export function Control() {
         </Section>
 
         <Section title="Location">
-          <LocationSection cfg={cfg} onPatch={set} />
-
-        <Section title="Location">
-          <Row label={cfg.locationName || "Location"} hint={formatLatLon(cfg.centerLat, cfg.centerLon)}>
-            <div className="loc-bar">
-              <TextInput
-                key={cfg.locationName}
-                value=""
-                placeholder="city, airport, or lat,lon"
-                ariaLabel="Change location"
-                onCommit={changeLocation}
-              />
-              <button
-                type="button"
-                className="loc-btn"
-                aria-label="Use current location"
-                disabled={geoBusy}
-                onClick={useCurrentLocation}
-              >
-                Current
-              </button>
-            </div>
-          </Row>
-          {geoBusy && <Row label="" hint="resolving…"><span /></Row>}
-          {geoErr && <Row label="" hint={geoErr}><span /></Row>}
-          <div className="chips">
-            {cfg.locationProfiles.map((pr) => (
-              <span key={pr.id} className={`profile-chip ${atCurrent(pr) ? "on" : ""}`}>
-                <button className="profile-name" onClick={() => switchToProfile(pr)}>
-                  {pr.name}
-                </button>
-                <button
-                  className="profile-del"
-                  aria-label={`Delete ${pr.name}`}
-                  onClick={() => removeProfile(pr.id)}
-                >
-                  ×
-                </button>
-              </span>
-            ))}
-            <button className="chip" onClick={saveCurrentProfile}>
-              + Save current
-            </button>
-            {state.aircraft.length > 0 && (
-              <button className="chip" onClick={centerOnTraffic}>
-                Center on traffic
-              </button>
-            )}
-          </div>
-        </Section>
-
-        <Section title="Source">
-          <Row label="Radio URL" hint="dump1090 aircraft.json">
-            <TextInput
-              value={cfg.radioUrl}
-              ariaLabel="Radio aircraft JSON URL"
-              onCommit={(v) => {
-                if (v !== cfg.radioUrl) set({ radioUrl: v });
-              }}
-            />
-          </Row>
+          <LocationSection cfg={cfg} onPatch={set} aircraft={state.aircraft} />
         </Section>
 
         <Section title="Calibration">
@@ -1037,6 +1062,17 @@ export function Control() {
               </button>
             ))}
           </div>
+          <Row label="Speed unit">
+            <Segmented
+              value={cfg.speedUnit}
+              options={[
+                { value: "kt", label: "kt" },
+                { value: "mph", label: "mph" },
+                { value: "kmh", label: "km/h" },
+              ]}
+              onChange={(v) => set({ speedUnit: v })}
+            />
+          </Row>
         </Section>
 
         <Section title="Filters">

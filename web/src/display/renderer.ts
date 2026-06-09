@@ -137,6 +137,14 @@ interface Track {
   alertPulseAt?: number;
   /** Visual colour of the active alert pulse. */
   alertPulseKind?: "emergency" | "interesting" | "watchlist";
+  /** Set once we're confident the aircraft has landed (soft-landing hysteresis).
+   *  Prevents the flicker caused by a taxiing plane oscillating around the
+   *  speed threshold — once committed, the track is suppressed for good. */
+  landingCommitted?: boolean;
+  /** performance.now() of the most recent history entry we've seen, used to
+   *  detect data gaps and dead-reckon renderedM through them so we never get
+   *  a large snap when positions resume after a pause. */
+  lastFixT?: number;
 }
 
 type ProjOpts = Parameters<typeof project>[1];
@@ -479,10 +487,18 @@ export class Renderer {
     const cfg = this.getConfig();
     const now = performance.now();
     const seenHexes = new Set<string>();
+    /** Hexes that are still in the live feed but now fail the filter (e.g. just
+     *  landed). We remove them immediately instead of leaving them as estimated
+     *  ghosts on the runway while the next arrival is on final approach. */
+    const failedFilterHexes = new Set<string>();
 
     for (const ac of aircraft) {
-      if (!this.passesFilter(ac, cfg)) continue;
       const hex = ac.hex.toLowerCase();
+      if (!this.passesFilter(ac, cfg)) {
+        // If we were already tracking this aircraft, mark it for immediate removal.
+        if (this.tracks.has(hex)) failedFilterHexes.add(hex);
+        continue;
+      }
       seenHexes.add(hex);
       const hasPos = ac.lat != null && ac.lon != null;
       let tr = this.tracks.get(hex);
@@ -510,6 +526,7 @@ export class Renderer {
         // Dedup identical fixes (source sometimes repeats a position).
         if (!last || last.lat !== ac.lat || last.lon !== ac.lon) {
           tr.history.push({ t: now, lat: ac.lat!, lon: ac.lon!, track: ac.track, gs: ac.gs });
+          tr.lastFixT = now;
           // Keep the full flight path for the followed aircraft (up to buffer
           // capacity); everyone else is trimmed to the trail window.
           const isFollowed = hex === cfg.followFlightHex.toLowerCase();
@@ -525,6 +542,15 @@ export class Renderer {
           tr.renderedM = llToMeters(ac.lat!, ac.lon!, cfg.centerLat, cfg.centerLon);
         }
       }
+    }
+
+    // Remove tracks that are still present in the live feed but now fail the
+    // filter (e.g. the aircraft just landed and crossed the near-ground threshold).
+    // Doing this here — before the estimated-memory block — ensures they vanish
+    // immediately rather than lingering as dimmed ghosts on the runway.
+    for (const hex of failedFilterHexes) {
+      this.tracks.delete(hex);
+      this.alertedHexes.delete(hex);
     }
 
     // Mark aircraft absent from this snapshot as estimated (if memory is enabled).
@@ -545,6 +571,12 @@ export class Renderer {
       if (alt < cfg.minAltitudeFt) return false;
       if (alt > cfg.maxAltitudeFt) return false;
     }
+    // Catch "soft landings": aircraft where the data source hasn't yet flipped
+    // onGround=true but the plane is clearly rolling out or taxiing — very low
+    // altitude AND very low ground speed. Without this, a freshly-landed flight
+    // keeps updating lastSeen and stays rendered on the runway while the next
+    // arrival is on short final, creating a phantom collision.
+    if (cfg.hideOnGround && alt != null && alt < 400 && (ac.gs ?? 999) < 50) return false;
     return true;
   }
 
@@ -632,6 +664,19 @@ export class Renderer {
     const followedPosition = followed ? this.sampleAt(followed, tt, cfg) : null;
     if (followed && followedPosition) {
       followed.renderedM ??= followedPosition;
+      // Dead-reckon through gaps for the followed aircraft too.
+      const newestFixT = followed.history.last()?.t;
+      if (
+        newestFixT !== undefined &&
+        followed.lastFixT !== undefined &&
+        newestFixT > followed.lastFixT + 1500 &&
+        followed.ac.gs != null && followed.ac.gs > 30 &&
+        followed.ac.track != null
+      ) {
+        const gapSec = Math.min((newestFixT - followed.lastFixT) / 1000, cfg.maxExtrapolationSec);
+        followed.renderedM = deadReckon(followed.renderedM, followed.ac.track, followed.ac.gs, gapSec);
+        followed.lastFixT = newestFixT; // consumed
+      }
       followed.renderedM = {
         east: followed.renderedM.east + (followedPosition.east - followed.renderedM.east) * motionFactor,
         north: followed.renderedM.north + (followedPosition.north - followed.renderedM.north) * motionFactor,
@@ -708,6 +753,22 @@ export class Renderer {
       // If somehow still undefined (e.g. center changed), seed it now.
       if (!tr.renderedM) tr.renderedM = sampled;
       if (tr !== followed) {
+        // Gap detection: if the newest history fix is significantly newer than
+        // the last one we saw, the source was paused (e.g. rate-limited).
+        // Dead-reckon renderedM forward through the gap so the lerp only has a
+        // tiny residual to close instead of the full multi-second displacement.
+        const newestFixT = tr.history.last()?.t;
+        if (
+          newestFixT !== undefined &&
+          tr.lastFixT !== undefined &&
+          newestFixT > tr.lastFixT + 1500 &&
+          tr.ac.gs != null && tr.ac.gs > 30 &&
+          tr.ac.track != null
+        ) {
+          const gapSec = Math.min((newestFixT - tr.lastFixT) / 1000, cfg.maxExtrapolationSec);
+          tr.renderedM = deadReckon(tr.renderedM, tr.ac.track, tr.ac.gs, gapSec);
+          tr.lastFixT = newestFixT; // consumed — don't apply again next frame
+        }
         tr.renderedM = {
           east:  tr.renderedM.east  + (sampled.east  - tr.renderedM.east)  * motionFactor,
           north: tr.renderedM.north + (sampled.north - tr.renderedM.north) * motionFactor,

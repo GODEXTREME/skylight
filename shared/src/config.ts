@@ -220,6 +220,8 @@ export interface Config {
   /** Human-readable place name for the current location (shown in the panel). */
   locationName: string;
   radiusMiles: number;
+  /** Saved places (airports/cities) switchable from the control panel. */
+  locationProfiles: LocationProfile[];
   /** Aircraft ICAO hex to keep centered. Empty string disables follow mode. */
   followFlightHex: string;
   /** Show moving geographic grid and nearby city labels while following. */
@@ -350,6 +352,7 @@ export const DEFAULT_CONFIG: Config = {
   centerLon: -122.379,
   locationName: "San Francisco International",
   radiusMiles: 3,
+  locationProfiles: [],
   followFlightHex: "",
   showFollowContext: true,
   locationProfiles: [],
@@ -423,6 +426,7 @@ export const DEFAULT_CONFIG: Config = {
   showSun: true,
   showMoon: true,
   showSatellites: true,
+  satelliteLabels: false,
   starMagLimit: 3.5,
   satelliteLabels: false,
   showPlanets: true,
