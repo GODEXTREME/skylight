@@ -1268,12 +1268,6 @@ export class Renderer {
     this.ctx.restore();
   }
 
-  private toScreen(ll: [number, number], cfg: Config, proj: ProjOpts): Point {
-    return project(
-      this.relativeToFollow(llToMeters(ll[0], ll[1], cfg.centerLat, cfg.centerLon)),
-      proj,
-    );
-  }
 
   private relativeToFollow(m: Meters): Meters {
     return {
@@ -1327,6 +1321,7 @@ export class Renderer {
       this.followOffset = { east: 0, north: 0 };
       this.followVelocity = { east: 0, north: 0 };
     }
+  }
 
   private toScreen(ll: [number, number], cfg: Config, proj: ProjOpts, altFt = 0): Point {
     const sample: GroundSample = {
