@@ -1,6 +1,6 @@
 // Small, touch-friendly control primitives for the phone settings panel.
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 export function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -51,6 +51,35 @@ export function Slider({
   unit?: string;
   onChange: (v: number) => void;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const displayValue = Number.isInteger(step) ? String(value) : value.toFixed(2);
+
+  const startEdit = () => {
+    setDraft(displayValue);
+    setEditing(true);
+    // Focus after render
+    setTimeout(() => inputRef.current?.select(), 0);
+  };
+
+  const commitEdit = () => {
+    const parsed = parseFloat(draft.replace(",", "."));
+    if (!isNaN(parsed)) {
+      const clamped = Math.max(min, Math.min(max, parsed));
+      // Round to nearest step
+      const stepped = Math.round(clamped / step) * step;
+      const final = parseFloat(stepped.toFixed(10)); // avoid float jitter
+      onChange(final);
+    }
+    setEditing(false);
+  };
+
+  const cancelEdit = () => {
+    setEditing(false);
+  };
+
   return (
     <div className="slider">
       <input
@@ -61,10 +90,32 @@ export function Slider({
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
       />
-      <span className="slider-value">
-        {Number.isInteger(step) ? value : value.toFixed(2)}
-        {unit}
-      </span>
+      {editing ? (
+        <input
+          ref={inputRef}
+          className="slider-value slider-value-edit"
+          type="number"
+          min={min}
+          max={max}
+          step={step}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commitEdit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { e.preventDefault(); commitEdit(); }
+            if (e.key === "Escape") { e.preventDefault(); cancelEdit(); }
+          }}
+          autoFocus
+        />
+      ) : (
+        <span
+          className="slider-value slider-value-clickable"
+          title="Click to type a value"
+          onClick={startEdit}
+        >
+          {displayValue}{unit}
+        </span>
+      )}
     </div>
   );
 }

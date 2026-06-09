@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useMemo } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import { type Aircraft, type Config, type Theme, DEFAULT_CONFIG } from "@shared/index.js";
 import { useStream } from "../lib/useStream.js";
 import { loadRuntimeAirports, registerAirports, type Airport } from "./airports.js";
@@ -102,6 +102,36 @@ export function Display() {
   const rendererRef = useRef<Renderer | null>(null);
   const configRef = useRef<Config>(state.config ?? DEFAULT_CONFIG);
   configRef.current = state.config ?? DEFAULT_CONFIG;
+
+
+  // ── Control drawer (left-edge hover panel) ─────────────────────────────────
+  const [drawerOpen, setDrawerOpen]   = useState(false);
+  const [drawerPinned, setDrawerPinned] = useState<boolean>(() => {
+    try { return localStorage.getItem("skylight-drawer-pinned") === "1"; } catch { return false; }
+  });
+  const drawerHoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const openDrawer  = useCallback(() => setDrawerOpen(true),  []);
+  const closeDrawer = useCallback(() => {
+    if (!drawerPinned) setDrawerOpen(false);
+  }, [drawerPinned]);
+
+  const togglePin = useCallback(() => {
+    setDrawerPinned((p) => {
+      const next = !p;
+      try { localStorage.setItem("skylight-drawer-pinned", next ? "1" : "0"); } catch {}
+      return next;
+    });
+  }, []);
+
+  const onLeftEdgeEnter = useCallback(() => {
+    if (drawerHoverTimer.current) clearTimeout(drawerHoverTimer.current);
+    drawerHoverTimer.current = setTimeout(openDrawer, 80);
+  }, [openDrawer]);
+
+  const onLeftEdgeLeave = useCallback(() => {
+    if (drawerHoverTimer.current) clearTimeout(drawerHoverTimer.current);
+  }, []);
 
   const [rendererStats, setRendererStats] = useState({ total: 0, estimated: 0, stale: 0 });
   const [rendererError, setRendererError] = useState<string | null>(null);
@@ -925,6 +955,46 @@ export function Display() {
       {!state.connected && (
         <div className="reconnect">connecting…</div>
       )}
+
+      {/* ── Left-edge hover trigger ── */}
+      <div
+        className="drawer-edge-trigger"
+        onMouseEnter={onLeftEdgeEnter}
+        onMouseLeave={onLeftEdgeLeave}
+      />
+
+      {/* ── Control drawer ── */}
+      <div
+        className={`control-drawer ${drawerOpen || drawerPinned ? "open" : ""}`}
+        onMouseLeave={closeDrawer}
+      >
+        <div className="control-drawer-header">
+          <span className="control-drawer-title">Controls</span>
+          <button
+            className={`drawer-pin-btn ${drawerPinned ? "pinned" : ""}`}
+            title={drawerPinned ? "Unpin panel" : "Pin panel open"}
+            onClick={togglePin}
+            aria-pressed={drawerPinned}
+          >
+            📌
+          </button>
+        </div>
+        <iframe
+          className="control-drawer-iframe"
+          src="/control"
+          title="Control panel"
+        />
+      </div>
+
+      {/* ── Radius indicator ── */}
+      {cfg && (
+        <div className="radius-indicator">
+          <span className="radius-label">r</span>
+          <span className="radius-value">{cfg.radiusMiles.toFixed(1)}</span>
+          <span className="radius-unit">mi</span>
+        </div>
+      )}
+
     </div>
   );
 }
