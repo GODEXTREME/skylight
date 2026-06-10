@@ -122,6 +122,13 @@ export interface TrackerConfig {
      * spikes; 0 = off.
      */
     maxAccelDps2: number;
+    /**
+     * Keep the sweep continuous: when the feedforward (predicted plane) rate
+     * exceeds this many deg/s, the drive is floored at it so the reactive P/I
+     * and deadband can't STOP or REVERSE a moving axis (the ~1 Hz stop-go).
+     * Below it, near-still targets rest normally. 0 = off.
+     */
+    minSweepDps: number;
   };
   zoom: {
     auto: boolean;
@@ -494,6 +501,7 @@ export const DEFAULT_CONFIG: Config = {
       posSmoothing: 0.7,
       errSmoothing: 0.5,
       maxAccelDps2: 80,
+      minSweepDps: 0.6,
     },
     zoom: {
       auto: true,
@@ -512,20 +520,22 @@ export const DEFAULT_CONFIG: Config = {
       applyCorrection: false,
       lockWide: true,
       autofocusOnZoom: true,
-      intervalMs: 250,
+      // Motion-compensated detection is cheap (no net, no contrast machinery),
+      // so the loop runs fast: ~10 Hz gives a fresh, low-lag error signal for a
+      // dead-set lock, and corrections glide on faster than the old 1.2°/s.
+      intervalMs: 100,
       encodeLagMs: 350,
-      correctionSlewDps: 1.2,
+      correctionSlewDps: 2.5,
       autoCalibrate: true,
       net: {
-        enabled: true,
+        // Retired: the YOLOX net (generic COCO, ~266 ms/inference) was the wrong
+        // tool for a speck on sky AND a CPU hog. Camera-motion-compensated
+        // detection replaced it. Left here (disabled) so old configs merge.
+        enabled: false,
         modelPath: "tracker/models/yolox_nano.onnx",
         inputSize: 416,
         scoreThresh: 0.3,
-        classId: 4, // COCO "airplane"
-        // ~266 ms/inference on the Pi 5 (2 threads). Every 3rd vision tick
-        // (~0.75–1 Hz) keeps the 3 s semantic bonus fresh without starving
-        // the TV's ffmpeg/chromium. Raise it if the Pi runs hot; net.enabled
-        // = false drops the whole layer back to classical-only.
+        classId: 4,
         everyNTicks: 3,
       },
     },

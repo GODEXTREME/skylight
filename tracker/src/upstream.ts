@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import WebSocket from "ws";
 import {
   DEFAULT_CONFIG,
+  PROTOCOL_VERSION,
   mergeConfig,
   type Aircraft,
   type ClientMessage,
@@ -82,7 +83,7 @@ export class WsUpstream implements Upstream {
     this.ws = ws;
     ws.on("open", () => {
       this.connected = true;
-      ws.send(JSON.stringify({ type: "hello", role: "control" } satisfies ClientMessage));
+      ws.send(JSON.stringify({ type: "hello", role: "control", protocolVersion: PROTOCOL_VERSION } satisfies ClientMessage));
     });
     ws.on("close", () => {
       this.connected = false;
