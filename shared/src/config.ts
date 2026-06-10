@@ -294,6 +294,8 @@ export interface Config {
   /** Color the glyph by altitude. */
   altitudeColor: boolean;
   trailSeconds: number;
+  /** Scale factor for the comet trail thickness. */
+  trailWidthScale?: number;
   /** Global brightness 0..1 (helps keep projector blacks deep). */
   brightness: number;
 
@@ -413,6 +415,7 @@ export const DEFAULT_CONFIG: Config = {
   glyphSizePx: 22,
   altitudeColor: true,
   trailSeconds: 30,
+  trailWidthScale: 1,
   brightness: 1,
 
   labelDensity: "all",
