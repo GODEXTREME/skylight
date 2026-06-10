@@ -6,28 +6,6 @@ import { dirname } from "node:path";
 import { DEFAULT_CONFIG, mergeConfig, validateConfigPatch, type Config } from "@shared/index.js";
 
 type Listener = (config: Config) => void;
-const RADIO_URL_ERROR = "radioUrl must be an http or https URL";
-
-function validateRadioUrl(radioUrl: unknown): void {
-  if (typeof radioUrl !== "string") {
-    throw new ConfigValidationError(RADIO_URL_ERROR);
-  }
-
-  try {
-    const { protocol } = new URL(radioUrl);
-    if (protocol === "http:" || protocol === "https:") return;
-  } catch {
-    // Fall through to the common validation error.
-  }
-
-  throw new ConfigValidationError(RADIO_URL_ERROR);
-}
-
-function validateConfigWrite(config: Partial<Config>): void {
-  if (config && Object.prototype.hasOwnProperty.call(config, "radioUrl")) {
-    validateRadioUrl(config.radioUrl);
-  }
-}
 
 export class ConfigValidationError extends Error {
   constructor(readonly errors: string[]) {

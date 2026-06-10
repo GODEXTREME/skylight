@@ -81,8 +81,10 @@ async function fetchJson(url: string, timeoutMs: number): Promise<any> {
 
 export interface PollerOptions {
   source: DataSource;
-  /** airplanes.live point template, {lat}/{lon}/{r} are filled from config. */
+  /** Primary API URL template: {lat}/{lon}/{r} are filled from config. */
   apiUrlTemplate: string;
+  /** Additional API URL templates polled in parallel and merged (deduped by hex). */
+  extraApiUrlTemplates?: string[];
   pollMs: number;
   /** When source is "radio", also poll the API and merge (keeps landing
    *  aircraft alive when local ADS-B drops them). */
@@ -116,6 +118,32 @@ function mergeSources(radio: Aircraft[], api: Aircraft[]): Aircraft[] {
   return [...byHex.values()];
 }
 
+/**
+ * Merge N API source lists into one, deduplicating by hex.
+ * Priority: (1) aircraft with a known position (lat/lon) wins over one without;
+ * (2) lower `seen` value = more recently heard by a receiver = preferred;
+ * (3) earlier list (primary source) wins on a tie.
+ */
+function mergeAll(lists: Aircraft[][]): Aircraft[] {
+  const byHex = new Map<string, Aircraft>();
+  for (const list of lists) {
+    for (const ac of list) {
+      const existing = byHex.get(ac.hex);
+      if (!existing) { byHex.set(ac.hex, ac); continue; }
+      // Prefer the entry with a known position.
+      const acHasPos = ac.lat != null && ac.lon != null;
+      const exHasPos = existing.lat != null && existing.lon != null;
+      if (acHasPos && !exHasPos) { byHex.set(ac.hex, ac); continue; }
+      if (!acHasPos && exHasPos) continue;
+      // Both have (or lack) position — prefer freshest `seen` value.
+      const acSeen = ac.seen ?? 999;
+      const exSeen = existing.seen ?? 999;
+      if (acSeen < exSeen) { byHex.set(ac.hex, ac); }
+    }
+  }
+  return [...byHex.values()];
+}
+
 /** Enrichment we've resolved for an aircraft, kept sticky for its session. */
 interface StickyEnrichment {
   typeName?: string;
@@ -145,6 +173,8 @@ export class Poller {
   private apiRunning = false;
   private apiFailures = 0;
   private nextApiAttempt = 0;
+  /** Per-extra-source backoff state: template → { failures, nextAttempt }. */
+  private extraState = new Map<string, { failures: number; nextAttempt: number }>();
   /** Consecutive primary-source failures (used for backoff when rate-limited). */
   private primaryFailures = 0;
   /** Earliest time (Date.now()) we're allowed to retry the primary source. */
@@ -208,7 +238,25 @@ export class Poller {
     }
   }
 
-  private async fetchList(source: DataSource, now: number): Promise<Aircraft[] | null> {
+  /** Fetch and normalize a list of aircraft from any URL (no retry logic). */
+  private async fetchFromUrl(url: string, now: number): Promise<Aircraft[] | null> {
+    const timeoutMs = Math.min(4000, this.o.pollMs * 0.8);
+    try {
+      const json = await fetchJson(url, timeoutMs);
+      const payload = json.aircraft ?? json.ac;
+      if (!Array.isArray(payload)) return null;
+      const list: Aircraft[] = [];
+      for (const raw of payload as RawAircraft[]) {
+        const ac = normalize(raw, now);
+        if (ac) list.push(ac);
+      }
+      return list;
+    } catch {
+      return null;
+    }
+  }
+
+  private async fetchList(source: DataSource, now: number): Promise<{ list: Aircraft[]; rateLimited: boolean; retryAfterSec?: number } | null> {
     // Timeout = 80% of poll interval, capped at 4 s. Prevents fetch pile-up
     // when the source is slow (e.g. Pi SDR under load).
     const timeoutMs = Math.min(4000, this.o.pollMs * 0.8);
@@ -253,6 +301,18 @@ export class Poller {
     } finally {
       this.apiRunning = false;
     }
+  }
+
+  private buildExtraUrl(template: string): string {
+    const c = this.o.getConfig();
+    const lat = this.followTargetPosition?.lat ?? c.centerLat;
+    const lon = this.followTargetPosition?.lon ?? c.centerLon;
+    const r = Math.min(250, Math.ceil(c.radiusMiles * NM_PER_MILE) + 1);
+    return template
+      .replace("{lat}", String(lat))
+      .replace("{lon}", String(lon))
+      .replace("{r}", String(r))
+      .replace("{dist}", String(r)); // adsb.fi uses {dist}
   }
 
   private buildApiUrl(): string {
@@ -321,7 +381,14 @@ export class Poller {
 
       const primary = result.list;
       const supplement = this.o.source === "radio" && this.o.supplementApi;
-      const merged = supplement ? mergeSources(primary, this.lastApi) : primary;
+      const supplemented = supplement ? mergeSources(primary, this.lastApi) : primary;
+
+      // Fetch extra sources in parallel (non-blocking: failures are silently ignored).
+      const extras = this.o.extraApiUrlTemplates ?? [];
+      const extraLists = await this.fetchExtraSources(extras, now);
+      const allLists = [supplemented, ...extraLists];
+      const merged = allLists.length > 1 ? mergeAll(allLists) : supplemented;
+
       this.retainFollowedAircraft(merged, now);
       for (const ac of merged) this.enrich(ac, now);
       this.last = merged;
@@ -329,13 +396,16 @@ export class Poller {
         this.pruneSticky(now);
         this.lastStickyPrune = now;
       }
+      const sourceLabel = extras.length > 0
+        ? `${this.o.source} + ${extras.length} extra (${merged.length} total)`
+        : undefined;
       this.status = {
         source: this.o.source,
         ok: true,
         count: merged.length,
         lastOk: now,
         pollMs: this.o.pollMs,
-        message: supplement ? `radio + ${this.lastApi.length} via API` : undefined,
+        message: supplement ? `radio + ${this.lastApi.length} via API` : sourceLabel,
         retryAfterMs: undefined,
       };
       this.o.onSnapshot(now, merged);
@@ -343,6 +413,30 @@ export class Poller {
     } finally {
       this.tickRunning = false;
     }
+  }
+
+  /**
+   * Fetch all extra API sources in parallel. Each source has independent
+   * backoff so a rate-limited source doesn't block the others.
+   */
+  private async fetchExtraSources(templates: string[], now: number): Promise<Aircraft[][]> {
+    if (templates.length === 0) return [];
+    const fetches = templates.map(async (tmpl) => {
+      let state = this.extraState.get(tmpl);
+      if (!state) { state = { failures: 0, nextAttempt: 0 }; this.extraState.set(tmpl, state); }
+      if (now < state.nextAttempt) return [];
+      const url = this.buildExtraUrl(tmpl);
+      const list = await this.fetchFromUrl(url, now);
+      if (list === null) {
+        state.failures++;
+        state.nextAttempt = now + Math.min(60_000, this.o.pollMs * 2 ** state.failures);
+        return [];
+      }
+      state.failures = 0;
+      state.nextAttempt = 0;
+      return list;
+    });
+    return Promise.all(fetches);
   }
 
   private retainFollowedAircraft(aircraft: Aircraft[], now: number): void {

@@ -2,7 +2,7 @@
 // broadcasts config / aircraft / status, and applies inbound config commands.
 
 import { WebSocketServer, WebSocket } from "ws";
-import type { IncomingMessage, Server } from "node:http";
+import type { Server } from "node:http";
 import { PROTOCOL_VERSION } from "@shared/index.js";
 import type {
   ClientMessage,

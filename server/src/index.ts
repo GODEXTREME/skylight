@@ -15,7 +15,7 @@ import { Hub } from "./hub.js";
 import { TleStore } from "./tle.js";
 import { FlightStats } from "./stats.js";
 import { resolveLocation } from "./geocode.js";
-import { buildHostMatcher, originHostname } from "./allowed-hosts.js";
+import { buildHostMatcher } from "./allowed-hosts.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = resolve(__dirname, "../data");
@@ -33,6 +33,15 @@ const ROUTE_CACHE_HOURS = Number(process.env.ROUTE_CACHE_HOURS ?? 12);
 // When on radio, also poll the API and merge (keeps landing aircraft alive).
 const SUPPLEMENT_API = (process.env.SUPPLEMENT_API ?? "1") !== "0";
 const API_POLL_MS = Number(process.env.API_POLL_MS ?? 4000);
+// Extra ADS-B sources polled in parallel and merged (deduped by hex).
+// Defaults to adsb.fi and adsb.lol (both free, same ADSBexchange v2 JSON format).
+// Set EXTRA_API_URLS="" to disable extra sources, or comma-separate multiple templates.
+const EXTRA_API_URLS: string[] = process.env.EXTRA_API_URLS != null
+  ? process.env.EXTRA_API_URLS.split(",").map(u => u.trim()).filter(Boolean)
+  : [
+      "https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{r}",
+      "https://api.adsb.lol/v2/lat/{lat}/lon/{lon}/dist/{r}",
+    ];
 // Nominatim asks for a descriptive User-Agent identifying the application.
 const GEOCODE_UA =
   process.env.GEOCODE_USER_AGENT ??
@@ -87,6 +96,7 @@ async function main(): Promise<void> {
   poller = new Poller({
     source: SOURCE,
     apiUrlTemplate: API_URL,
+    extraApiUrlTemplates: EXTRA_API_URLS,
     pollMs: POLL_MS,
     supplementApi: SUPPLEMENT_API,
     apiPollMs: API_POLL_MS,
