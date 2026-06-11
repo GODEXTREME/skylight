@@ -50,31 +50,48 @@ export interface ViscaOptions {
   commandHz?: number;
 }
 
-// Drive-speed step -> SUSTAINED deg/s, measured on the TONGVEO with the
-// two-timed-sweep method (scripts/measure-speeds.ts): distance(1.8 s) minus
-// distance(0.8 s) so the accel ramp and decel tail cancel exactly. (The old
-// table came from 1.2 s windows INCLUDING the ramp and read 30-40% low.)
-// Steps whose repeated measurements stayed non-monotonic are omitted; the
-// dither in trackRate synthesizes anything between two adjacent entries.
+// Drive-speed step -> SUSTAINED deg/s. Low steps (0-3) re-measured 2026-06-10
+// by RTSP background frame-shift (scripts/video-speed.ts, slow-limits.ts,
+// byte0-verify.ts) — the old two-timed-sweep table read step 1 as 3.61°/s, a
+// truncation artifact; the real byte-1 floor is ~7.9. Steps 4+ keep the sweep
+// measurements (small relative error up there, and they only matter for
+// repositioning). Steps whose repeated measurements stayed non-monotonic are
+// omitted; the dither in trackRate synthesizes anything between two entries.
+//
+// Speed byte 0x00 is a REAL slow gear (~1.47°/s pan, steady over 8 s), not a
+// no-op — it had simply never been sent because every code path clamped
+// Math.max(1, byte). "Stopped" is STOP_STEP (-1), not 0, for that reason.
 const PAN_SPEEDS: [number, number][] = [
-  [1, 3.61], [2, 14.82], [3, 22.76], [4, 26.55], [5, 29.32], [6, 31.05],
+  [0, 1.47], [1, 7.9], [2, 17.6], [3, 21.2], [4, 26.55], [5, 29.32], [6, 31.05],
   [7, 35.57], [9, 41.5], [11, 44.59], [12, 47.26], [13, 50.06], [16, 54.15],
   [17, 56.01], [18, 57.85], [19, 64.76], [20, 67.56], [21, 71.53],
   [22, 74.23], [24, 75.16],
 ];
+// Tilt has the 0x00 slow gear too: 1.47°/s both directions, dead steady
+// (bench-measured 2026-06-10, byte0-verify.ts) — same rate as pan, so it's a
+// motor-controller-wide gear, not a pan quirk.
 const TILT_SPEEDS: [number, number][] = [
-  [1, 3.0], [2, 4.13], [3, 5.5], [4, 7.67], [5, 9.29], [6, 11.86],
+  [0, 1.47], [1, 3.0], [2, 4.5], [3, 6.2], [4, 7.67], [5, 9.29], [6, 11.86],
   [7, 13.36], [8, 13.8], [9, 16.82], [10, 17.68], [11, 20.31], [13, 23.52],
   [15, 24.78], [16, 26.14], [17, 30.45], [19, 33.5],
 ];
 
-/** Closest speed step for a desired |deg/s|; 0 = below the slowest step. */
+/** Sentinel for "axis not driven" — distinct from speed byte 0, a real gear. */
+const STOP_STEP = -1;
+
+/**
+ * Closest speed step for a desired |deg/s|; 0 = below the slowest step.
+ * Used only to map ABSOLUTE-move speed bytes (setPose) — byte 0x00 is skipped
+ * because its behavior on the 06 02 command is unverified (callers clamp to
+ * ≥1 anyway).
+ */
 function speedStep(table: [number, number][], dps: number): number {
   const want = Math.abs(dps);
   if (want < table[0][1] * 0.5) return 0;
-  let best = table[0][0];
+  let best = 0;
   let bestErr = Infinity;
   for (const [step, rate] of table) {
+    if (step === 0) continue;
     const err = Math.abs(rate - want);
     if (err < bestErr) {
       bestErr = err;
@@ -86,7 +103,7 @@ function speedStep(table: [number, number][], dps: number): number {
 
 /** Sustained deg/s of a discrete speed step (nearest table entry). */
 function stepRate(table: [number, number][], step: number): number {
-  if (step <= 0) return 0;
+  if (step < 0) return 0;
   let best = table[0];
   for (const e of table) {
     if (Math.abs(e[0] - step) < Math.abs(best[0] - step)) best = e;
@@ -96,8 +113,8 @@ function stepRate(table: [number, number][], step: number): number {
 
 /**
  * The two steps bracketing a desired |deg/s|, and where between them it sits.
- * lo step 0 = stopped (rates below the table floor are reachable by duty-
- * cycling against a stop).
+ * lo step STOP_STEP = stopped (rates below the table floor are reachable by
+ * duty-cycling against a stop).
  */
 function bracket(
   table: [number, number][],
@@ -105,7 +122,7 @@ function bracket(
 ): { loStep: number; hiStep: number; duty: number } {
   const want = Math.abs(dps);
   if (want <= table[0][1]) {
-    return { loStep: 0, hiStep: table[0][0], duty: want / table[0][1] };
+    return { loStep: STOP_STEP, hiStep: table[0][0], duty: want / table[0][1] };
   }
   for (let i = 1; i < table.length; i++) {
     if (want <= table[i][1]) {
@@ -269,14 +286,19 @@ export class ViscaCamera implements CameraDriver {
     this.wantedMatched = speeds != null;
   }
 
-  /** Max position ripple budget contributed by rate dithering, deg. */
-  private static readonly DITHER_RIPPLE_DEG = 0.2;
-  /** Minimum dwell per discrete speed state, ms. The pan table has a wide
-   *  low-speed gap (step 1→2 is 3.6→14.8 °/s), so any wanted rate in between
-   *  must dither — and the detrended position ripple is ≈ rate-error × dwell.
-   *  The earlier "quiet" 260 ms dwell drifted ±1.5°, the wobble seen on slow
-   *  pan tracking; 60 ms cuts that ~4× to ±0.4° (≈6–15 speed flips/s — a soft
-   *  hum, not the old lockstep grind). Smoothness wins over silence here. */
+  /** Max position ripple budget contributed by rate dithering, deg.
+   *
+   *  Tuning history: 0.2° with a 60 ms dwell flipped speed states 6-15×/s —
+   *  tolerable when each flip was small, but with the corrected tables a
+   *  plane-band rate (2-3 °/s) dithers across the 1.47↔7.9 °/s gear gap and
+   *  every flip is a sharp velocity step (the motor has no soft ramp —
+   *  measured), so ~3 catch-up bursts per second read as visible micro-ticks.
+   *  0.5° trades that for fewer, longer states (~1 burst/s): more positional
+   *  ripple, which the TV's crop-follow prediction absorbs digitally — that
+   *  is exactly the division of labor it was built for. */
+  private static readonly DITHER_RIPPLE_DEG = 0.5;
+  /** Minimum dwell per discrete speed state, ms. The ripple budget above is
+   *  the flip-rate lever; this only stops degenerate chatter. */
   private static readonly DITHER_MIN_DWELL_MS = 60;
 
   /** Per-axis sigma-delta dither state. */
@@ -303,7 +325,7 @@ export class ViscaCamera implements CameraDriver {
     if (w < table[0][1] * 0.15) {
       st.acc = 0;
       st.onHi = false;
-      return 0; // too slow even to duty-cycle
+      return STOP_STEP; // too slow even to duty-cycle
     }
     const { loStep, hiStep, duty } = bracket(table, w);
     if (duty >= 0.93) {
@@ -316,7 +338,7 @@ export class ViscaCamera implements CameraDriver {
       st.onHi = false;
       return loStep;
     }
-    const loRate = loStep === 0 ? 0 : stepRate(table, loStep);
+    const loRate = loStep === STOP_STEP ? 0 : stepRate(table, loStep);
     const hiRate = stepRate(table, hiStep);
     st.acc += (w - (st.onHi ? hiRate : loRate)) * dt;
     const R = ViscaCamera.DITHER_RIPPLE_DEG;
@@ -338,7 +360,7 @@ export class ViscaCamera implements CameraDriver {
    * The motor only offers discrete speed steps; picking the nearest one
    * leaves a rate error the position loop must absorb as a visible limit
    * cycle. Instead, sigma-delta dither between the two BRACKETING steps
-   * (including "stop" below the table floor) so the time-averaged rate
+   * (including STOP_STEP below the table floor) so the time-averaged rate
    * matches exactly — see pickDithered. Callers invoke this every tick
    * (~15 Hz), which clocks the dither; actual datagrams go out only when
    * the discrete command changes.
@@ -377,16 +399,18 @@ export class ViscaCamera implements CameraDriver {
     const panStep = this.pickDithered(this.panDither, PAN_SPEEDS, pd, now);
     const tiltStep = this.pickDithered(this.tiltDither, TILT_SPEEDS, td, now);
     // Pan units increase to the RIGHT (02); tilt units increase UP (01).
-    const panDir = panStep === 0 ? 0x03 : pd > 0 ? 0x02 : 0x01;
-    const tiltDir = tiltStep === 0 ? 0x03 : td > 0 ? 0x01 : 0x02;
+    const panDir = panStep === STOP_STEP ? 0x03 : pd > 0 ? 0x02 : 0x01;
+    const tiltDir = tiltStep === STOP_STEP ? 0x03 : td > 0 ? 0x01 : 0x02;
 
     // Only transmit when the discrete command actually changes.
     const key = `${panStep}:${panDir}:${tiltStep}:${tiltDir}`;
     if (key === this.lastDrive) return;
     this.lastDrive = key;
+    // A stopped axis (dir 0x03) ignores its speed byte — send the canonical 1.
+    // Byte 0x00 must pass through unclamped: it's the slow gear.
     this.sendCommand([
       0x81, 0x01, 0x06, 0x01,
-      Math.max(1, panStep), Math.max(1, tiltStep),
+      panStep === STOP_STEP ? 1 : panStep, tiltStep === STOP_STEP ? 1 : tiltStep,
       panDir, tiltDir,
       0xff,
     ]);

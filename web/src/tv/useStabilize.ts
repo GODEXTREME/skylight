@@ -1,26 +1,38 @@
-// Client-side digital stabilization. The PTZ motor can't pan continuously below
-// ~3.6°/s, so tracking a slow plane lurches (stop ↔ 3.6°/s). We can't fix that
-// mechanically — but we know exactly where the plane is in frame (the tracker's
-// vision), so we GPU-transform the <video> to hold it centered. The browser does
-// the work; the Pi just sends the offset it already computes. The mechanical
-// stutter is cancelled in what you watch.
+// Client-side digital stabilization (crop-follow). The PTZ motor's slowest
+// continuous gear is ~1.5°/s and rates between its discrete speeds are
+// synthesized by dithering, so a residual sub-degree ripple survives in the
+// raw feed. We know where the plane is in frame (the tracker's vision), so we
+// GPU-transform the <video> to hold it centred: scale(Z) gives overscan so
+// the translate never reveals a black edge; the translate moves the plane to
+// frame centre. Net feature displacement is Z·t, so t = (0.5 − cx) centres it
+// regardless of Z; |t| is clamped to the overscan (0.5 − 0.5/Z).
 //
-// scale(Z) gives overscan so the translate never reveals a black edge; the
-// translate moves the plane (cx,cy) to frame centre. Net feature displacement is
-// Z·t, so t = (0.5 − cx) centres it regardless of Z; |t| is clamped to the
-// overscan (0.5 − 0.5/Z). An EMA eases onto the target so detector noise and the
-// ~10 Hz update cadence don't add their own jitter.
+// Detections arrive at ~10 Hz describing already-old video frames. Easing
+// toward those stale samples (the previous version) lagged AND juddered at
+// 10 Hz. Now CropFollow carries the plane's in-frame velocity forward every
+// display frame, so the crop rides a continuous predicted path; the final
+// light EMA only strips detector jitter, not motion.
 
 import { useEffect, useRef, type MutableRefObject } from "react";
 import type { TrackerState } from "@shared/index.js";
+import { CropFollow } from "./cropFollow.js";
 
 export interface StabilizeOpts {
   enabled?: boolean;
   /** Overscan zoom; max recenter shift is (0.5 − 0.5/zoom) of the frame. */
   zoom?: number;
-  /** EMA factor toward the target offset per frame (0..1). Higher = snappier. */
+  /** EMA factor per frame for the zoom relax (0..1). */
   ease?: number;
+  /** EMA factor per frame for the position (jitter filter only — prediction
+   *  does the tracking, so this can be snappy). */
+  posEase?: number;
+  /** Constant pipeline-offset trim, ms: raise if the crop trails the plane
+   *  on screen, lower (can go negative) if it leads. */
+  leadMs?: number;
 }
+
+/** Detections older than this are a lost target — relax to full view. */
+const TRACK_TIMEOUT_MS = 1500;
 
 export function useStabilize(
   videoRef: MutableRefObject<HTMLVideoElement | null>,
@@ -30,9 +42,12 @@ export function useStabilize(
   const enabled = opts.enabled ?? true;
   const zoom = opts.zoom ?? 1.25;
   const ease = opts.ease ?? 0.22;
+  const posEase = opts.posEase ?? 0.35;
+  const leadMs = opts.leadMs ?? 0;
   const detRef = useRef(detection);
   detRef.current = detection;
   const cur = useRef({ x: 0, y: 0, z: 1 });
+  const follow = useRef(new CropFollow());
 
   useEffect(() => {
     const v = videoRef.current;
@@ -40,10 +55,13 @@ export function useStabilize(
       if (v) v.style.transform = "";
       return;
     }
+    follow.current.reset();
     let raf = 0;
     const tick = () => {
+      const now = performance.now();
       const d = detRef.current;
-      const tracking = !!d && d.ageMs < 1500;
+      if (d && d.ageMs < TRACK_TIMEOUT_MS) follow.current.feed(d, now);
+      const tracking = follow.current.sampleAgeMs(now) < TRACK_TIMEOUT_MS;
       // Zoom in only while tracking; relax to full view (scale 1, no shift)
       // when there's no plane, so idle isn't permanently cropped.
       const targetZ = tracking ? zoom : 1;
@@ -52,11 +70,12 @@ export function useStabilize(
       let tx = 0;
       let ty = 0;
       if (tracking) {
-        tx = Math.max(-maxShift, Math.min(maxShift, 0.5 - d!.cx));
-        ty = Math.max(-maxShift, Math.min(maxShift, 0.5 - d!.cy));
+        const p = follow.current.predict(now, leadMs);
+        tx = Math.max(-maxShift, Math.min(maxShift, 0.5 - p.cx));
+        ty = Math.max(-maxShift, Math.min(maxShift, 0.5 - p.cy));
       }
-      cur.current.x += (tx - cur.current.x) * ease;
-      cur.current.y += (ty - cur.current.y) * ease;
+      cur.current.x += (tx - cur.current.x) * posEase;
+      cur.current.y += (ty - cur.current.y) * posEase;
       const el = videoRef.current;
       if (el) {
         el.style.transformOrigin = "center center";
@@ -71,5 +90,5 @@ export function useStabilize(
       const el = videoRef.current;
       if (el) el.style.transform = "";
     };
-  }, [enabled, zoom, ease, videoRef]);
+  }, [enabled, zoom, ease, posEase, leadMs, videoRef]);
 }
