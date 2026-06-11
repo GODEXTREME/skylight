@@ -324,6 +324,8 @@ export interface Config {
   showSun: boolean;
   showMoon: boolean;
   showSatellites: boolean; // includes the ISS
+  /** Keep the view centered on the ISS satellite. */
+  followISS: boolean;
   /** Label non-ISS satellites with their names (the ISS is always labelled). */
   satelliteLabels: boolean;
   /** Draw the naked-eye planets (Venus, Jupiter, Mars, Saturn, Mercury). */
@@ -444,6 +446,7 @@ export const DEFAULT_CONFIG: Config = {
   showSun: true,
   showMoon: true,
   showSatellites: true,
+  followISS: false,
   satelliteLabels: false,
   starMagLimit: 3.5,
   showPlanets: true,
