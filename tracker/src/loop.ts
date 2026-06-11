@@ -66,6 +66,8 @@ export class ControlLoop {
   /** Idle ready-position state. */
   private lastTargetAt = 0;
   private atHome = false;
+  /** Snapshot of the camera options the live driver was built with. */
+  private driverOptsKey: string | null = null;
   /** Last carrot re-issue time. */
   private lastCarrotAt = 0;
   /** Last commanded velocity rates (direction-flip hysteresis + accel cap). */
@@ -199,7 +201,21 @@ export class ControlLoop {
     this.rescheduleTick();
     const t = config.tracker;
     const d = this.driver();
-    if (d.kind !== t.driver) this.swapDriver(t.driver);
+    // Rebuild the driver when anything it was CONSTRUCTED with changes —
+    // limits/units/address are baked in at construction, so a config patch
+    // (e.g. raising tiltMinDeg as a privacy floor) silently never reached
+    // the live driver. Key is null until the first config lands, which also
+    // covers the boot case where the initial driver was built from defaults.
+    const optsKey = JSON.stringify({
+      ip: t.cameraIp,
+      port: t.viscaPort,
+      units: t.units,
+      limits: t.limits,
+    });
+    if (d.kind !== t.driver || this.driverOptsKey !== optsKey) {
+      this.swapDriver(t.driver);
+    }
+    this.driverOptsKey = optsKey;
     // Re-evaluate the idle park: a changed home az/el should move the camera
     // now, not after the next pass.
     this.atHome = false;

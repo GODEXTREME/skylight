@@ -73,12 +73,17 @@ async function main(): Promise<void> {
     : new WsUpstream(SERVER_WS, {
         onSnapshot: (now, aircraft) => loop.onSnapshot(now, aircraft),
         onConfig: (config) => {
-          loop.onConfig(config);
+          // URLs FIRST: loop.onConfig may swap the driver, and swapDriver
+          // start()s the streams — with the URLs set after, the first start
+          // used the stale default IP and burned two junk RTSP sessions per
+          // boot against a firmware that's session-sensitive (setUrl no-ops
+          // on an unchanged URL, so this order is free).
           // Vision/MJPEG runs on the substream; the TV gets the main stream
           // remuxed untouched.
           video.setUrl(rtspUrl(config.tracker.rtspSubUrl, config.tracker.cameraIp));
           mse.setUrl(rtspUrl(config.tracker.rtspUrl, config.tracker.cameraIp));
           videoRec.setUrl(rtspUrl(config.tracker.rtspUrl, config.tracker.cameraIp));
+          loop.onConfig(config);
           hub.broadcastConfig();
         },
       });

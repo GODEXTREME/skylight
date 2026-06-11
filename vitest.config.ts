@@ -10,6 +10,7 @@ export default defineConfig({
       "shared/test/**/*.test.ts",
       "tracker/test/**/*.test.ts",
       "server/test/**/*.test.ts",
+      "web/test/**/*.test.ts",
     ],
   },
 });

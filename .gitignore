@@ -8,6 +8,7 @@ data/
 
 # deployment notes with LAN addresses / household-specific details — never commit
 HANDOFF.md
+CROP_FOLLOW_HANDOFF.md
 
 # local scratch
 .cam-explore.mjs
@@ -26,3 +27,7 @@ tracker/models/
 
 # local harness state
 .claude/
+
+# stream credentials (instance env files) — examples stay committed
+stream/.env*
+!stream/.env*.example
