@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Aircraft, Config, ShowFields, LocationProfile } from "@shared/index.js";
+import type { Aircraft, AirportBoardDirection, Config, ShowFields, LocationProfile } from "@shared/index.js";
 import { useStream } from "../lib/useStream.js";
 import { nextISSPass, type Tle } from "../display/celestial.js";
 import { ColorRow, Row, Section, Segmented, Slider, Toggle } from "./components.js";
@@ -1131,6 +1131,56 @@ export function Control() {
           </Row>
         </Section>
 
+        <Section title="Airport board">
+          <Row label="Airport code" hint="IATA code e.g. SFO, JFK, LHR">
+            <input
+              className="location-input"
+              type="text"
+              placeholder="e.g. SFO"
+              value={cfg.airportBoard.airportCode}
+              onChange={(e) =>
+                set({ airportBoard: { ...cfg.airportBoard, airportCode: e.target.value.toUpperCase() } })
+              }
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="characters"
+              spellCheck={false}
+              maxLength={4}
+              style={{ width: "80px", textTransform: "uppercase" }}
+            />
+          </Row>
+          <Row label="Direction">
+            <Segmented
+              value={cfg.airportBoard.direction}
+              options={[
+                { value: "arrivals" as AirportBoardDirection, label: "Arrivals" },
+                { value: "departures" as AirportBoardDirection, label: "Departures" },
+              ]}
+              onChange={(v) =>
+                set({ airportBoard: { ...cfg.airportBoard, direction: v as AirportBoardDirection } })
+              }
+            />
+          </Row>
+          {cfg.airportBoard.airportCode.trim() && (
+            <div style={{ padding: "4px" }}>
+              <a
+                href="/airport"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "var(--accent)", fontSize: "12px", textDecoration: "none" }}
+              >
+                Open airport board ↗
+              </a>
+            </div>
+          )}
+          {!cfg.airportBoard.airportCode.trim() && (
+            <div style={{ padding: "4px", fontSize: "11px", color: "#6b7280", lineHeight: "1.4" }}>
+              Enter an IATA airport code to enable the arrivals/departures board panel at{" "}
+              <code style={{ fontSize: "10px" }}>/airport</code>.
+            </div>
+          )}
+        </Section>
+
         <Section title="Palette">
           <div className="palette">
             <ColorRow label="Background" value={cfg.palette.bg}
@@ -1161,6 +1211,13 @@ export function Control() {
             onClick={() => location.assign("/diagnostics")}
           >
             Open diagnostics
+          </button>
+          <button
+            className="reset"
+            style={{ color: "var(--accent)" }}
+            onClick={() => window.open("/airport", "_blank")}
+          >
+            Open airport board
           </button>
           <button className="reset" onClick={() => conn.resetConfig()}>
             Reset all to defaults

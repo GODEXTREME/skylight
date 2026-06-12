@@ -14,6 +14,14 @@ import type {
 import type { FovPoint } from "./aim.js";
 
 export type Theme = "ambient" | "telemetry" | "focus";
+export type AirportBoardDirection = "arrivals" | "departures";
+
+export interface AirportBoardConfig {
+  /** IATA airport code (e.g. "SFO"). Empty string = panel disabled. */
+  airportCode: string;
+  direction: AirportBoardDirection;
+}
+
 export type LabelDensity = "all" | "nearestN" | "nearestOnly";
 export type DataSource = "radio" | "api";
 /** Ground-speed display unit. ADS-B reports knots; the rest are converted. */
@@ -346,6 +354,9 @@ export interface Config {
   watchlist: string;
   /** Draw airspace sectors overlay */
   showAirspace: boolean;
+  // --- airport arrivals/departures board ---
+  airportBoard: AirportBoardConfig;
+
   // --- PTZ camera tracker ---
   tracker: TrackerConfig;
 }
@@ -446,6 +457,10 @@ export const DEFAULT_CONFIG: Config = {
   alertInteresting: true,
   watchlist: "",
   showAirspace: true,
+  airportBoard: {
+    airportCode: "",
+    direction: "arrivals",
+  },
   tracker: {
     driver: "sim",
     cameraIp: "192.168.0.206", // factory default; updated at network bring-up
@@ -560,6 +575,7 @@ export function mergeConfig(base: Config, patch: Partial<Config>): Config {
     palette: { ...base.palette, ...(patch.palette ?? {}) },
     fonts: { ...base.fonts, ...(patch.fonts ?? {}) },
     showFields: { ...base.showFields, ...(patch.showFields ?? {}) },
+    airportBoard: { ...base.airportBoard, ...(patch.airportBoard ?? {}) },
     tracker: mergeTrackerConfig(base.tracker, patch.tracker ?? {}),
   };
   // hideOnlyAfterSec must be >= aircraftMemorySec; clamp silently so an
