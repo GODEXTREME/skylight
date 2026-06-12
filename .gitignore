@@ -5,6 +5,8 @@ dist/
 # runtime state (persisted config, route + TLE caches)
 server/data/
 data/
+# generated static airport dataset (build artifact committed to repo)
+!web/public/data/
 
 # deployment notes with LAN addresses / household-specific details — never commit
 HANDOFF.md

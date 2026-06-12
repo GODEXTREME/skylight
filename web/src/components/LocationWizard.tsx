@@ -1,8 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { LeafletMouseEvent } from "leaflet";
 import { CircleMarker, MapContainer, TileLayer, useMap, useMapEvents } from "react-leaflet";
-import { fetchClosestAirport } from "./ourairports.js";
+import {
+  loadAirports,
+  searchAirports,
+  findClosestAirport,
+  toDisplayAirport,
+} from "./airportSearch.js";
+import type { AirportRecord } from "./airportSearch.js";
 
 interface GeocodeResult {
   display_name: string;
@@ -12,6 +18,12 @@ interface GeocodeResult {
 
 interface SetupStatus {
   hasSavedConfig: boolean;
+  airportBoardCode?: string;
+}
+
+interface SelectedAirport {
+  record: AirportRecord;
+  display: ReturnType<typeof toDisplayAirport>;
 }
 
 const PRESETS = [
@@ -47,6 +59,18 @@ export function LocationWizard() {
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState("");
 
+  // Airport search state.
+  const [airportQuery, setAirportQuery] = useState("");
+  const [airportResults, setAirportResults] = useState<AirportRecord[]>([]);
+  const [selectedAirport, setSelectedAirport] = useState<SelectedAirport | null>(null);
+  const [allAirports, setAllAirports] = useState<AirportRecord[]>([]);
+  const [airportsLoaded, setAirportsLoaded] = useState(false);
+  const [airportLoadError, setAirportLoadError] = useState(false);
+  const airportSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Board-code sync offer.
+  const [syncBoardCode, setSyncBoardCode] = useState<string | null>(null);
+
   useEffect(() => {
     let live = true;
     Promise.all([
@@ -65,10 +89,31 @@ export function LocationWizard() {
       .catch(() => {
         if (live) setError("Failed to load current settings.");
       });
-    return () => {
-      live = false;
-    };
+    return () => { live = false; };
   }, []);
+
+  // Pre-load airports dataset so search is instant.
+  useEffect(() => {
+    loadAirports().then((airports) => {
+      setAllAirports(airports);
+      setAirportsLoaded(true);
+      if (!airports.length) setAirportLoadError(true);
+    });
+  }, []);
+
+  // Debounced airport search.
+  useEffect(() => {
+    if (airportSearchTimer.current) clearTimeout(airportSearchTimer.current);
+    const q = airportQuery.trim();
+    if (q.length < 2) {
+      setAirportResults([]);
+      return;
+    }
+    airportSearchTimer.current = setTimeout(() => {
+      setAirportResults(searchAirports(q, allAirports, 8));
+    }, 120);
+    return () => { if (airportSearchTimer.current) clearTimeout(airportSearchTimer.current); };
+  }, [airportQuery, allAirports]);
 
   const position = useMemo<[number, number]>(() => [lat, lon], [lat, lon]);
 
@@ -79,9 +124,7 @@ export function LocationWizard() {
     setError(null);
     try {
       const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&q=${encodeURIComponent(query.trim())}`;
-      const res = await fetch(url, {
-        headers: { Accept: "application/json" },
-      });
+      const res = await fetch(url, { headers: { Accept: "application/json" } });
       if (!res.ok) throw new Error("search failed");
       const data = (await res.json()) as GeocodeResult[];
       setResults(data);
@@ -102,22 +145,68 @@ export function LocationWizard() {
     setResults([]);
   };
 
+  const selectAirport = (a: AirportRecord) => {
+    const display = toDisplayAirport(a);
+    setSelectedAirport({ record: a, display });
+    setLat(a.lat);
+    setLon(a.lon);
+    setAirportQuery("");
+    setAirportResults([]);
+
+    // Offer board-code sync if the airport has an IATA code.
+    if (a.iata) {
+      const existing = status?.airportBoardCode ?? "";
+      if (!existing || existing.toUpperCase() !== a.iata) {
+        setSyncBoardCode(a.iata);
+      } else {
+        setSyncBoardCode(null);
+      }
+    } else {
+      setSyncBoardCode(null);
+    }
+  };
+
+  const clearAirport = () => {
+    setSelectedAirport(null);
+    setSyncBoardCode(null);
+  };
+
   const save = async () => {
     setSaving(true);
     setError(null);
     try {
-      setSaveStatus("Fetching nearest airport geometry...");
-      const customAirport = await fetchClosestAirport(lat, lon);
-      
-      setSaveStatus("Saving config...");
+      let customAirport: SelectedAirport["display"] | null = null;
+
+      if (selectedAirport) {
+        customAirport = selectedAirport.display;
+      } else {
+        // Manual coordinates: attempt nearest airport lookup, non-fatal on failure.
+        setSaveStatus("Looking up nearest airport geometry…");
+        if (allAirports.length) {
+          const nearest = findClosestAirport(lat, lon, allAirports);
+          if (nearest) customAirport = toDisplayAirport(nearest);
+        }
+      }
+
+      setSaveStatus("Saving config…");
+      const body: Record<string, unknown> = {
+        centerLat: lat,
+        centerLon: lon,
+        radiusMiles,
+        customAirport: customAirport ?? null,
+      };
+      if (syncBoardCode) {
+        body.airportBoardCode = syncBoardCode;
+      }
+
       const res = await fetch("/api/setup/location", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ centerLat: lat, centerLon: lon, radiusMiles, customAirport }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(body?.error ?? "Save failed");
+        const b = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(b?.error ?? "Save failed");
       }
       location.assign("/control");
     } catch (err) {
@@ -135,6 +224,86 @@ export function LocationWizard() {
       </header>
 
       <section className="setup-card">
+        {/* Airport search */}
+        <div className="setup-airport-search">
+          <label className="setup-section-label">Airport</label>
+          {selectedAirport ? (
+            <div className="setup-airport-selected">
+              <span className="setup-airport-name">
+                {selectedAirport.record.iata
+                  ? `${selectedAirport.record.iata} / ${selectedAirport.record.icao}`
+                  : selectedAirport.record.icao}{" "}
+                — {selectedAirport.record.name}
+              </span>
+              <button type="button" className="setup-airport-clear" onClick={clearAirport}>
+                ✕ Clear
+              </button>
+            </div>
+          ) : (
+            <div className="setup-airport-input-wrap">
+              <input
+                type="search"
+                placeholder={
+                  airportLoadError
+                    ? "Airport data unavailable — enter coordinates manually"
+                    : airportsLoaded
+                      ? "IATA / ICAO / name (e.g. SFO, KSFO, Heathrow)"
+                      : "Loading airports…"
+                }
+                disabled={airportLoadError}
+                value={airportQuery}
+                onChange={(e) => setAirportQuery(e.target.value)}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="characters"
+                spellCheck={false}
+              />
+              {airportLoadError && (
+                <p className="setup-airport-warning">
+                  Could not load airport data. Manual coordinates and previously saved runway
+                  geometry will still work.
+                </p>
+              )}
+            </div>
+          )}
+
+          {airportResults.length > 0 && !selectedAirport && (
+            <ul className="setup-airport-results">
+              {airportResults.map((a) => (
+                <li key={a.icao}>
+                  <button type="button" onClick={() => selectAirport(a)}>
+                    <span className="airport-result-code">
+                      {a.iata ? `${a.iata} / ${a.icao}` : a.icao}
+                    </span>
+                    <span className="airport-result-name">{a.name}</span>
+                    {a.municipality && (
+                      <span className="airport-result-muni">
+                        {a.municipality}
+                        {a.country ? `, ${a.country}` : ""}
+                      </span>
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {syncBoardCode && (
+            <div className="setup-board-sync">
+              <span>
+                Also set airport board code to <strong>{syncBoardCode}</strong>?
+              </span>
+              <button type="button" onClick={() => setSyncBoardCode(syncBoardCode)}>
+                Yes, sync
+              </button>
+              <button type="button" onClick={() => setSyncBoardCode(null)}>
+                No, keep existing
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Geocode search */}
         <form className="setup-search" onSubmit={runSearch}>
           <input
             type="search"
@@ -178,6 +347,7 @@ export function LocationWizard() {
             <ClickToSet onPick={(nextLat, nextLon) => {
               setLat(nextLat);
               setLon(nextLon);
+              clearAirport();
             }} />
             <CircleMarker center={position} radius={8} pathOptions={{ color: "#9b7ecf" }} />
           </MapContainer>
@@ -192,7 +362,10 @@ export function LocationWizard() {
               max={90}
               step="0.000001"
               value={lat}
-              onChange={(e) => setLat(Number(e.target.value))}
+              onChange={(e) => {
+                setLat(Number(e.target.value));
+                clearAirport();
+              }}
             />
           </label>
           <label>
@@ -203,7 +376,10 @@ export function LocationWizard() {
               max={180}
               step="0.000001"
               value={lon}
-              onChange={(e) => setLon(Number(e.target.value))}
+              onChange={(e) => {
+                setLon(Number(e.target.value));
+                clearAirport();
+              }}
             />
           </label>
           <label>
@@ -228,7 +404,7 @@ export function LocationWizard() {
             {saving ? "Saving…" : "Save and continue"}
           </button>
           {status?.hasSavedConfig && (
-            <button type="button" className="secondary" onClick={() => location.assign("/control") }>
+            <button type="button" className="secondary" onClick={() => location.assign("/control")}>
               Cancel
             </button>
           )}
