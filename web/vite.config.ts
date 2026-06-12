@@ -35,6 +35,7 @@ export default defineConfig({
         diagnostics: resolve(__dirname, "diagnostics.html"),
         tracker: resolve(__dirname, "tracker.html"),
         tv: resolve(__dirname, "tv.html"),
+        airport: resolve(__dirname, "airport.html"),
       },
     },
   },
