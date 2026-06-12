@@ -32,7 +32,7 @@ constellations, and live **satellites including the ISS** - all at their true po
 for your location and time. Tune everything from your phone.
 
 > Reference build is centered on **San Francisco International (SFO)**, but it works
-> anywhere - set your coordinates (and swap the runway data) and you're flying.
+> anywhere - set your coordinates and pick your local airport in the setup wizard, and you're flying.
 
 ## Features
 
@@ -213,10 +213,31 @@ fields:
 | `tracker.*` | The whole camera subsystem - driver (`sim`/`visca`), camera IP, mount calibration, target selection criteria, prediction/pursuit tuning, zoom + vision behavior. All live-tunable from the tracker debug UI. |
 
 **Using it somewhere other than SFO:** run the setup wizard (`/setup` in production,
-`/setup.html` in local Vite dev) to save your location, then replace the runway
-geometry in [`web/src/display/airports.ts`](web/src/display/airports.ts) with your
-local airport (coordinates from [OurAirports](https://ourairports.com/data/)). Stars,
-sun, moon, and satellites are computed for your coordinates automatically.
+`/setup.html` in local Vite dev) to save your location. The wizard includes an airport
+search — type an IATA code (e.g. `SFO`), ICAO code (e.g. `KSFO`), or airport name
+(e.g. `Heathrow`) to pick your local airport; runway geometry is loaded automatically
+from the bundled dataset. Stars, sun, moon, and satellites are computed for your
+coordinates automatically.
+
+**Airport data (offline / refresh):** Runway geometry is served from
+`web/public/data/airports.json`, generated at build time from a snapshot of the
+[OurAirports](https://ourairports.com/data/) public dataset (CC0).
+
+- **Offline:** the file is already checked in — no network access is needed at runtime.
+- **Refresh:** to update to the latest upstream data, run:
+  ```sh
+  node scripts/generate-airports.mjs
+  ```
+  The script downloads `airports.csv` + `runways.csv`, filters large/medium airports
+  with valid runway geometry, and overwrites `web/public/data/airports.json`.
+  Review the reported include/skip counts, then commit the updated file.
+  To use local CSV snapshots instead of downloading fresh ones:
+  ```sh
+  node scripts/generate-airports.mjs --airports /path/airports.csv --runways /path/runways.csv
+  ```
+- **Rollback:** `git revert` the commit that updated `airports.json`.
+  No persisted-config migration is needed; bundled airports and any saved
+  `customAirport` geometry in the config are unaffected.
 
 ### Server environment
 
