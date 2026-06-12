@@ -267,6 +267,12 @@ export function Display() {
     if (pollMs && pollMs > 0) rendererRef.current?.setPollMs(pollMs);
   }, [state.status?.pollMs]);
 
+  // Source health: during an outage the renderer holds planes instead of
+  // staling them out. A dropped WebSocket counts as an outage too.
+  useEffect(() => {
+    rendererRef.current?.setSourceOk(state.connected && (state.status?.ok ?? true));
+  }, [state.connected, state.status]);
+
   // Automatically fetch and register nearby airports when the center or radius changes.
   useEffect(() => {
     if (!state.config) return;

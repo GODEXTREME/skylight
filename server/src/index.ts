@@ -16,6 +16,8 @@ import { TleStore } from "./tle.js";
 import { FlightStats } from "./stats.js";
 import { resolveLocation } from "./geocode.js";
 import { buildHostMatcher } from "./allowed-hosts.js";
+import { SfoGroundPoller } from "./sfo-ground.js";
+import { lookupAirport } from "./airports.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = resolve(__dirname, "../data");
@@ -88,6 +90,7 @@ async function main(): Promise<void> {
     store,
     getSnapshot: () => poller.getSnapshot(),
     getStatus: () => poller.getStatus(),
+    getSfoGround: () => sfoGround.getSnapshot(),
     isOriginAllowed: (origin) => {
       if (!origin) return true;
       try { return hostMatcher.test(new URL(origin).hostname); } catch { return false; }
@@ -108,6 +111,13 @@ async function main(): Promise<void> {
     },
     onStatus: (status) => hub.broadcastStatus(status),
   });
+
+  // SFO surface traffic (airplanes.live) — the "who's next" panel on the TV
+  // and Twitch stream. Local receiver can't hear ground targets at 13 mi.
+  const sfoGround = new SfoGroundPoller((at, aircraft) =>
+    hub.broadcastSfoGround(at, aircraft),
+  );
+
   // --- REST API (handy for debugging + non-WS clients) ---
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
   app.get("/api/config", (_req, res) => res.json(store.get()));
@@ -187,6 +197,19 @@ async function main(): Promise<void> {
     }
   });
 
+  // Resolve an ICAO/IATA airport code to runway geometry (OurAirports data)
+  // for the ceiling's runway overlay. The control panel patches the result
+  // into config.airport.
+  app.get("/api/airport", async (req, res) => {
+    const code = String(req.query.code ?? "").trim();
+    if (!code) return res.status(400).json({ error: "missing query parameter code" });
+    try {
+      res.json(await lookupAirport(code, DATA_DIR));
+    } catch (err) {
+      res.status(404).json({ error: err instanceof Error ? err.message : "lookup failed" });
+    }
+  });
+
   // --- static web (production build) ---
   if (existsSync(WEB_DIST)) {
     app.use(express.static(WEB_DIST));
@@ -204,6 +227,7 @@ async function main(): Promise<void> {
   }
 
   poller.start();
+  sfoGround.start();
 
   server.listen(PORT, HOST, () => {
     console.log(`[server] listening on http://${HOST}:${PORT}`);

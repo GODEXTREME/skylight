@@ -39,6 +39,7 @@ import { computeSky, type Sky, type Tle } from "./celestial.js";
 import { ASTERISMS } from "./stars.js";
 import { CITIES } from "./cities.js";
 import { WeatherRadar } from "./weather.js";
+import tzLookup from "tz-lookup";
 
 /** How far in the past we render, ms. Starts at 1.15× the default poll cadence
  *  and is updated at runtime from the server's reported pollMs. */
@@ -233,6 +234,10 @@ export class Renderer {
   /** How far in the past we render. Updated via setPollMs() when the server
    *  reports its poll cadence so the delay auto-tunes to any poll rate. */
   private renderDelayMs = DEFAULT_RENDER_DELAY_MS;
+  /** When the source went down (rAF clock), null while healthy. While down,
+   *  the staleness clock pauses so a transient fetch failure doesn't wipe the
+   *  sky and re-spawn everything seconds later. */
+  private sourceDownAt: number | null = null;
 
   // ── Pan / explore mode ──────────────────────────────────────────────────────
   /** Extra camera offset set by the drag-to-pan gesture (meters, config coords). */
@@ -292,6 +297,15 @@ export class Renderer {
    *  window so interpolation stays centred between real fixes at any poll rate. */
   setPollMs(pollMs: number): void {
     this.renderDelayMs = pollMs * 1.15;
+  }
+
+  /** Source health from server status / WebSocket connection. When the source
+   *  goes down, the staleness clock pauses so planes hold in place instead of
+   *  vanishing. A 90-second hard cap still clears the sky if the source stays
+   *  dead long enough that frozen positions become misleading. */
+  setSourceOk(ok: boolean): void {
+    if (ok) this.sourceDownAt = null;
+    else this.sourceDownAt ??= performance.now();
   }
 
   /** Must be called from a user-gesture handler (click / keydown) to unlock
@@ -694,12 +708,28 @@ export class Renderer {
     const visible: Visible[] = [];
 
     for (const [hex, tr] of this.tracks) {
-      const stale = (now - tr.lastSeen) / 1000;
+      let stale = (now - tr.lastSeen) / 1000;
 
       // --- Anti-flicker aircraft memory ---
       // If memory is enabled, keep tracks alive past staleSec, fading them out
       // gracefully instead of blinking them off.
       const memSec = cfg.aircraftMemorySec ?? 0;
+
+      // Source-outage hold: pause the staleness clock while the data source is
+      // down so planes dim in place instead of vanishing and re-spawning.
+      // A hard cap still clears the sky if the source stays dead too long.
+      if (this.sourceDownAt !== null) {
+        const downFor = (now - this.sourceDownAt) / 1000;
+        stale = Math.max(0, stale - downFor);
+        const rawAge = (now - tr.lastSeen) / 1000;
+        const hardCap = Math.max(memSec > 0 ? cfg.hideOnlyAfterSec : cfg.staleSec, 90);
+        if (rawAge > hardCap) {
+          this.tracks.delete(hex);
+          this.alertedHexes.delete(hex);
+          continue;
+        }
+      }
+
       if (memSec > 0) {
         if (stale > cfg.hideOnlyAfterSec) {
           this.tracks.delete(hex);
@@ -2000,7 +2030,7 @@ export class Renderer {
       const head = ac.origin ? `${ac.origin} → ${ac.destination}` : `→ ${ac.destination}`;
       out.push({ text: ac.destName ? `${head}   ${ac.destName}` : head, kind: "sub" });
       if (cfg.showRouteDetail && ac.destLat != null && ac.destLon != null) {
-        const bits: string[] = [`${localTimeAt(ac.destLon)} local`];
+        const bits: string[] = [`${localTimeAt(ac.destLat, ac.destLon)} local`];
         if (ac.lat != null && ac.lon != null) {
           const mi = Math.round(greatCircleMiles(ac.lat, ac.lon, ac.destLat, ac.destLon));
           if (mi > 1) bits.push(`${mi.toLocaleString("en-US")} mi to go`);
@@ -2254,10 +2284,10 @@ export class Renderer {
     if (hoursRemaining !== null) {
       const h = Math.floor(hoursRemaining);
       const m = Math.floor((hoursRemaining - h) * 60);
-      const etaStr = localTimeAt(dLon, hoursRemaining);
+      const etaStr = localTimeAt(dLat, dLon, hoursRemaining);
       timeText = ` · ${h}h ${m}m left (ETA: ${etaStr})`;
     } else {
-      const etaStr = localTimeAt(dLon, 0);
+      const etaStr = localTimeAt(dLat, dLon, 0);
       timeText = ` · Local: ${etaStr}`;
     }
 
@@ -2480,15 +2510,27 @@ function greatCircleMiles(lat1: number, lon1: number, lat2: number, lon2: number
   return 3958.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-/** Longitude-based mean solar time at a place (no DST/tz db) as HH:MM. */
-function localTimeAt(lon: number, addHours = 0): string {
-  const now = new Date();
-  const utcMin = now.getUTCHours() * 60 + now.getUTCMinutes() + addHours * 60;
-  let m = (utcMin + (lon / 15) * 60) % 1440;
-  if (m < 0) m += 1440;
-  const hh = Math.floor(m / 60);
-  const mm = Math.floor(m % 60);
-  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+/** Civil local time at a place as HH:MM (real timezone incl. DST).
+ *  Falls back to longitude-based mean solar time if the tz lookup fails —
+ *  solar time can read up to ~55 min off the wall clock. */
+function localTimeAt(lat: number, lon: number, addHours = 0): string {
+  const target = new Date(Date.now() + addHours * 3_600_000);
+  try {
+    const tz = tzLookup(lat, lon);
+    return target.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: tz,
+    });
+  } catch {
+    const utcMin = target.getUTCHours() * 60 + target.getUTCMinutes();
+    let m = (utcMin + (lon / 15) * 60) % 1440;
+    if (m < 0) m += 1440;
+    const hh = Math.floor(m / 60);
+    const mm = Math.floor(m % 60);
+    return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+  }
 }
 
 function formatAltitudeLabel(

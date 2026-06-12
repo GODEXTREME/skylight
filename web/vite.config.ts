@@ -36,6 +36,7 @@ export default defineConfig({
         tracker: resolve(__dirname, "tracker.html"),
         tv: resolve(__dirname, "tv.html"),
         airport: resolve(__dirname, "airport.html"),
+        stream: resolve(__dirname, "stream.html"),
       },
     },
   },

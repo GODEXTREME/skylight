@@ -7,6 +7,21 @@ set -euo pipefail
 
 APPDIR="${APPDIR:-$HOME/skylight}"
 USER_NAME="$(id -un)"
+
+# 64-bit userland required: NodeSource ships no armhf packages (Node would
+# fail to install mid-run with "Unsupported architecture: armhf", #26).
+# A 64-bit kernel with 32-bit userland still reports armhf here — what
+# matters is the OS image, not the chip.
+ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+case "$ARCH" in
+  arm64|aarch64|amd64|x86_64) ;;
+  *)
+    echo "ERROR: unsupported architecture '$ARCH'." >&2
+    echo "Skylight needs a 64-bit OS (Node.js has no 32-bit ARM builds)." >&2
+    echo "Re-flash with Raspberry Pi OS (64-bit) — Pi 3/4/5 and Zero 2 W all support it." >&2
+    exit 1
+    ;;
+esac
 # Receiver reference position (set to your location). Defaults to SFO.
 LAT="${LAT:-37.6213}"
 LON="${LON:--122.379}"

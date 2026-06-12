@@ -23,12 +23,26 @@ export interface SourceStatus {
   retryAfterMs?: number;
 }
 
+/** An aircraft on the airport surface (from the airplanes.live area API). */
+export interface GroundAircraft {
+  hex: string;
+  /** Callsign, trimmed. */
+  flight?: string;
+  reg?: string;
+  typeCode?: string;
+  lat: number;
+  lon: number;
+  trackDeg?: number;
+  gsKt?: number;
+}
+
 /** Server -> client. */
 export type ServerMessage =
   | { type: "config"; config: Config }
   | { type: "aircraft"; now: number; seq: number; aircraft: Aircraft[] }
   | { type: "aircraftDelta"; now: number; seq: number; upsert: Aircraft[]; remove: string[]; alive: string[] }
   | { type: "status"; status: SourceStatus }
+  | { type: "sfoGround"; at: number; aircraft: GroundAircraft[] }
   | { type: "ack"; requestId: string }
   | { type: "pong" }
   | { type: "error"; requestId?: string; message: string };
