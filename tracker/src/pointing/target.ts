@@ -44,8 +44,12 @@ function score(ac: Aircraft, azEl: AzEl, mode: TargetMode, c: TargetCriteria): {
       const s = rangeFrac + vertical + low + 0.15 * (azEl.elDeg / 90);
       return { s, note: vr < -300 ? "descending" : vr > 300 ? "climbing" : "level" };
     }
-    case "sticky": {
+    case "sticky":
+    default: {
       // Same geometry score as overhead; stickiness handled by the holder.
+      // `default` keeps score() total — a stale config.json can carry a mode
+      // string this build doesn't know, and crashing the loop on it is worse
+      // than filming the overhead-best plane (#22).
       const s = azEl.elDeg / 90 + 0.3 * rangeFrac;
       return { s, note: `el ${azEl.elDeg.toFixed(0)}°` };
     }
@@ -80,7 +84,9 @@ export function selectTarget(
     const azEl = azElFromSite(site, geo);
     if (azEl.elDeg < c.minElevationDeg) continue;
     if (azEl.slantM > c.maxRangeMi * MI_TO_M) continue;
-    const { s, note } = score(ac, azEl, mode, c);
+    const scored = score(ac, azEl, mode, c);
+    if (!scored) continue;
+    const { s, note } = scored;
     candidates.push({
       hex: ac.hex,
       flight: ac.flight,
