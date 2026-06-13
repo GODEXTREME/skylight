@@ -831,12 +831,20 @@ export function Control() {
             <FlightSearch
               aircraft={state.aircraft}
               cfg={cfg}
-              onFollow={(hex) => set({ followFlightHex: hex })}
+              onFollow={(hex) => set({ followFlightHex: hex, followISS: false })}
             />
           </div>
+          <Row label="Track ISS Space Station" hint="lock map center to ISS sub-satellite position">
+            <Toggle
+              value={cfg.followISS}
+              onChange={(v) => set({ followISS: v, ...(v ? { followFlightHex: "" } : {}) })}
+            />
+          </Row>
           <Row label="Status">
-            <span className={cfg.followFlightHex ? "follow-setting-active" : "follow-setting-idle"}>
-              {cfg.followFlightHex
+            <span className={(cfg.followFlightHex || cfg.followISS) ? "follow-setting-active" : "follow-setting-idle"}>
+              {cfg.followISS
+                ? "Tracking ISS Space Station"
+                : cfg.followFlightHex
                 ? `Following ${
                     state.aircraft.find(
                       (ac) => ac.hex.toLowerCase() === cfg.followFlightHex.toLowerCase(),
@@ -851,8 +859,8 @@ export function Control() {
               onChange={(v) => set({ showFollowContext: v })}
             />
           </Row>
-          {cfg.followFlightHex && (
-            <button className="follow-setting-stop" onClick={() => set({ followFlightHex: "" })}>
+          {(cfg.followFlightHex || cfg.followISS) && (
+            <button className="follow-setting-stop" onClick={() => set({ followFlightHex: "", followISS: false })}>
               Stop following and return home
             </button>
           )}
@@ -934,6 +942,10 @@ export function Control() {
           <Row label="Trail length">
             <Slider value={cfg.trailSeconds} min={0} max={120} step={5} unit="s"
               onChange={(v) => set({ trailSeconds: v })} />
+          </Row>
+          <Row label="Trail thickness">
+            <Slider value={cfg.trailWidthScale ?? 1} min={0.2} max={2} step={0.1}
+              onChange={(v) => set({ trailWidthScale: v })} />
           </Row>
           <Row label="Color by altitude">
             <Toggle value={cfg.altitudeColor} onChange={(v) => set({ altitudeColor: v })} />
@@ -1129,6 +1141,15 @@ export function Control() {
           <Row label="Local time & distance">
             <Toggle value={cfg.showRouteDetail} onChange={(v) => set({ showRouteDetail: v })} />
           </Row>
+          <Row label="Speed vectors" hint="projected flight path line">
+            <Toggle value={cfg.showSpeedVectors} onChange={(v) => set({ showSpeedVectors: v })} />
+          </Row>
+          {cfg.showSpeedVectors && (
+            <Row label="Vector lookahead">
+              <Slider value={cfg.speedVectorMinutes} min={0.5} max={10} step={0.5} unit="m"
+                onChange={(v) => set({ speedVectorMinutes: v })} />
+            </Row>
+          )}
         </Section>
 
         <Section title="Airport board">

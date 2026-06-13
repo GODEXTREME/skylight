@@ -35,7 +35,7 @@ import {
 } from "@shared/index.js";
 import { AIRPORTS, getAirportRevision, type Airport, type AirportArea } from "./airports.js";
 import { classifyGlyph, drawAircraftGlyph, GLYPH_SCALE } from "./aircraftGlyph.js";
-import { computeSky, type Sky, type Tle } from "./celestial.js";
+import { computeSky, getSatellitePosition, type Sky, type Tle } from "./celestial.js";
 import { ASTERISMS } from "./stars.js";
 import { CITIES } from "./cities.js";
 import { WeatherRadar } from "./weather.js";
@@ -200,6 +200,15 @@ export interface AircraftHit {
   followed: boolean;
 }
 
+export interface SkyHit {
+  kind: "sun" | "moon" | "planet" | "satellite" | "iss" | "star";
+  name: string;
+  x: number;
+  y: number;
+  az: number;
+  alt: number;
+}
+
 export class Renderer {
   private ctx: CanvasRenderingContext2D;
   private issPulseAt?: number;
@@ -227,6 +236,7 @@ export class Renderer {
   private followVelocity: Meters = { east: 0, north: 0 };
   private activeFollowHex = "";
   private visibleHits: AircraftHit[] = [];
+  private skyHits: SkyHit[] = [];
   /** Tracks the last committed center so we can detect pan commits and
    *  invalidate smoothed renderedM positions on all tracks. */
   private lastCenterLat = NaN;
@@ -390,6 +400,38 @@ export class Renderer {
 
   getAircraftHit(hex: string): AircraftHit | null {
     return this.visibleHits.find((hit) => hit.aircraft.hex.toLowerCase() === hex.toLowerCase()) ?? null;
+  }
+
+  hitTestSky(clientX: number, clientY: number): SkyHit | null {
+    const rect = this.canvas.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    let best: SkyHit | null = null;
+    let bestDistance = 36; // px hit radius — larger for sky objects since they're small
+    for (const hit of this.skyHits) {
+      const distance = Math.hypot(hit.x - x, hit.y - y);
+      if (distance < bestDistance) {
+        best = hit;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Hit test all layers, prioritizing aircraft hits, then airport hits, then sky hits.
+   */
+  hitTestAll(clientX: number, clientY: number): { type: "aircraft"; hit: AircraftHit } | { type: "airport"; hit: Airport } | { type: "sky"; hit: SkyHit } | null {
+    const aircraftHit = this.hitTest(clientX, clientY);
+    if (aircraftHit) return { type: "aircraft", hit: aircraftHit };
+
+    const airportHit = this.hitTestAirport(clientX, clientY);
+    if (airportHit) return { type: "airport", hit: airportHit };
+
+    const skyHit = this.hitTestSky(clientX, clientY);
+    if (skyHit) return { type: "sky", hit: skyHit };
+
+    return null;
   }
 
   getAirportScreenPos(icao: string): { x: number; y: number } | null {
@@ -623,7 +665,17 @@ export class Renderer {
   }
 
   private draw(): void {
-    const cfg = this.getConfig();
+    let cfg = this.getConfig();
+    if (cfg.followISS && this.tles.length) {
+      const issTle = this.tles.find((t) => /ISS|ZARYA/i.test(t.name));
+      if (issTle) {
+        const date = new Date(Date.now() + cfg.skyTimeOffsetMin * 60000);
+        const pos = getSatellitePosition(date, issTle);
+        if (pos) {
+          cfg = { ...cfg, centerLat: pos.lat, centerLon: pos.lon };
+        }
+      }
+    }
     const ctx = this.ctx;
     const now = performance.now();
     const frameDt = this.prevFrame ? (now - this.prevFrame) / 1000 : 0.016;
@@ -632,10 +684,20 @@ export class Renderer {
 
     this.weather.update(cfg);
 
-    // Detect pan commits: when centerLat/Lon changes, flush all smoothed
-    // renderedM values so trails and positions rebase to the new center cleanly.
+    // Detect center changes: when centerLat/Lon changes (due to pan, zoom, or ISS tracking),
+    // rebase all smoothed renderedM values so aircraft trails and positions shift smoothly.
     if (cfg.centerLat !== this.lastCenterLat || cfg.centerLon !== this.lastCenterLon) {
-      for (const tr of this.tracks.values()) tr.renderedM = undefined;
+      if (!isNaN(this.lastCenterLat) && !isNaN(this.lastCenterLon)) {
+        const shift = llToMeters(cfg.centerLat, cfg.centerLon, this.lastCenterLat, this.lastCenterLon);
+        for (const tr of this.tracks.values()) {
+          if (tr.renderedM) {
+            tr.renderedM.east -= shift.east;
+            tr.renderedM.north -= shift.north;
+          }
+        }
+      } else {
+        for (const tr of this.tracks.values()) tr.renderedM = undefined;
+      }
       this.lastCenterLat = cfg.centerLat;
       this.lastCenterLon = cfg.centerLon;
     }
@@ -691,7 +753,7 @@ export class Renderer {
         north: followed.renderedM.north + (followedPosition.north - followed.renderedM.north) * motionFactor,
       };
     }
-    this.updateFollowCamera(followHex, followed?.renderedM, frameDt);
+    this.updateFollowCamera(cfg.followISS ? "" : followHex, cfg.followISS ? undefined : followed?.renderedM, frameDt);
 
     this.updateSky(cfg, now);
     this.drawSky(cfg, proj);
@@ -1392,7 +1454,8 @@ export class Renderer {
   private drawSky(cfg: Config, proj: ProjOpts): void {
     const ctx = this.ctx;
     const b = cfg.brightness;
-    let issCurrentlyVisible = false;
+    // Rebuild sky hit targets every frame so they stay in sync with animation.
+    const newSkyHits: SkyHit[] = [];
 
     // Asterism lines (faint) — need star screen points by id.
     if (cfg.showStars && this.sky.stars.length) {
@@ -1474,7 +1537,7 @@ export class Renderer {
       }
     }
 
-    if (cfg.showStars && this.sky.planets && this.sky.planets.length) {
+    if (cfg.showPlanets && this.sky.planets && this.sky.planets.length) {
       for (const p of this.sky.planets) {
         const pt = this.projectSky(p.az, p.alt, cfg, proj);
         const mag = p.mag ?? 1;
@@ -1493,33 +1556,17 @@ export class Renderer {
     }
 
     if (cfg.showMoon && this.sky.moon && this.sky.moon.alt > -2) {
-      this.drawMoon(this.projectSky(this.sky.moon.az, this.sky.moon.alt, cfg, proj),
-        this.sky.moon.illum ?? 1, this.sky.moon.waning ?? false, b);
+      const mp = this.projectSky(this.sky.moon.az, this.sky.moon.alt, cfg, proj);
+      this.drawMoon(mp, this.sky.moon.illum ?? 1, this.sky.moon.waning ?? false, b);
+      newSkyHits.push({ kind: "moon", name: "Moon", x: mp.x, y: mp.y, az: this.sky.moon.az, alt: this.sky.moon.alt });
     }
     if (cfg.showSun && this.sky.sun && this.sky.sun.alt > -2) {
-      this.drawSun(this.projectSky(this.sky.sun.az, this.sky.sun.alt, cfg, proj), b);
+      const sp = this.projectSky(this.sky.sun.az, this.sky.sun.alt, cfg, proj);
+      this.drawSun(sp, b);
+      newSkyHits.push({ kind: "sun", name: "Sun", x: sp.x, y: sp.y, az: this.sky.sun.az, alt: this.sky.sun.alt });
     }
-    if (cfg.showPlanets && this.sky.planets.length) {
-      for (const pl of this.sky.planets) {
-        const p = this.projectSky(pl.az, pl.alt, cfg, proj);
-        const mag = pl.mag ?? 1;
-        // Brighter planets (lower magnitude) read larger, with a soft glow.
-        const size = Math.max(1.6, Math.min(4, 3 - mag * 0.5));
-        const col = PLANET_COLORS[pl.name ?? ""] ?? "230,224,205";
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(${col},${0.95 * b})`;
-        if (mag < 0.5) {
-          ctx.shadowColor = `rgba(${col},${b})`;
-          ctx.shadowBlur = size * 2.5;
-        }
-        ctx.fill();
-        ctx.shadowBlur = 0;
-        if (pl.name) {
-          this.skyLabel({ x: p.x + 6, y: p.y - 6 }, pl.name, cfg, 0.7 * b, `rgb(${col})`);
-        }
-      }
-    }
+
+    let issCurrentlyVisible = false;
     if (cfg.showSatellites && this.sky.sats.length) {
       const now = performance.now();
       for (const sat of this.sky.sats) {
@@ -1554,25 +1601,111 @@ export class Renderer {
           }
         }
         
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, iss ? 3 : 1.6, 0, Math.PI * 2);
         if (iss) {
-          ctx.fillStyle = `rgba(140,255,214,${0.95 * b})`;
-          ctx.shadowColor = `rgba(140,255,214,${b})`;
-          ctx.shadowBlur = 10;
+          this.drawIssStructure(ctx, p.x, p.y, 13, b);
+          this.skyLabel({ x: p.x + 11, y: p.y - 11 }, "ISS", cfg, 0.95 * b, "#8CFFD6");
         } else {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 1.6, 0, Math.PI * 2);
           ctx.fillStyle = `rgba(170,205,255,${0.65 * b})`;
+          ctx.fill();
+
+          if (cfg.satelliteLabels && sat.name) {
+            const label = sat.name
+              .split(/\s+/)
+              .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+              .join(" ");
+            this.skyLabel({ x: p.x + 4, y: p.y - 4 }, label, cfg, 0.45 * b, "#AAC8FF");
+          }
         }
-        ctx.fill();
-        ctx.shadowBlur = 0;
-        if (iss) {
-          this.skyLabel({ x: p.x + 6, y: p.y - 6 }, "ISS", cfg, 0.9 * b, "#8CFFD6");
-        } else if (cfg.satelliteLabels && sat.name) {
-          this.skyLabel({ x: p.x + 5, y: p.y - 5 }, sat.name, cfg, 0.6 * b);
-        }
+        newSkyHits.push({
+          kind: iss ? "iss" : "satellite",
+          name: sat.name ?? (iss ? "ISS" : "Satellite"),
+          x: p.x, y: p.y,
+          az: sat.az, alt: sat.alt,
+        });
       }
     }
     this.issVisible = issCurrentlyVisible;
+
+    // Planets hit targets (drawn earlier in the method)
+    if (cfg.showPlanets && this.sky.planets) {
+      for (const pl of this.sky.planets) {
+        const pt = this.projectSky(pl.az, pl.alt, cfg, proj);
+        newSkyHits.push({ kind: "planet", name: pl.name ?? "Planet", x: pt.x, y: pt.y, az: pl.az, alt: pl.alt });
+      }
+    }
+
+    this.skyHits = newSkyHits;
+  }
+
+  private drawIssStructure(ctx: CanvasRenderingContext2D, px: number, py: number, size: number, b: number): void {
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(Math.PI / 4); // Rotate 45 degrees for space station dynamic profile
+
+    const alpha = 0.9 * b;
+    ctx.strokeStyle = `rgba(140,255,214,${alpha})`;
+    ctx.fillStyle = `rgba(140,255,214,${alpha})`;
+    ctx.lineWidth = 1.1;
+    ctx.shadowColor = `rgba(140,255,214,${b})`;
+    ctx.shadowBlur = 4;
+
+    // 1. Central truss: main horizontal bar
+    ctx.beginPath();
+    ctx.moveTo(-size, 0);
+    ctx.lineTo(size, 0);
+    ctx.stroke();
+
+    // 2. Central pressurized modules
+    ctx.fillRect(-size * 0.25, -size * 0.15, size * 0.5, size * 0.3);
+    
+    // Perpendicular lab modules
+    ctx.fillRect(-size * 0.08, -size * 0.35, size * 0.16, size * 0.7);
+
+    // 3. Solar arrays (orange/golden panels flanking the ends)
+    ctx.strokeStyle = `rgba(255, 200, 100, ${0.85 * b})`;
+    ctx.fillStyle = `rgba(255, 200, 100, ${0.3 * b})`;
+    ctx.lineWidth = 0.8;
+
+    // Left solar panel arrays
+    for (const x of [-size * 0.95, -size * 0.65]) {
+      ctx.beginPath();
+      ctx.rect(x - size * 0.08, -size * 0.45, size * 0.16, size * 0.35);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.rect(x - size * 0.08, size * 0.1, size * 0.16, size * 0.35);
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    // Right solar panel arrays
+    for (const x of [size * 0.5, size * 0.8]) {
+      ctx.beginPath();
+      ctx.rect(x - size * 0.08, -size * 0.45, size * 0.16, size * 0.35);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.rect(x - size * 0.08, size * 0.1, size * 0.16, size * 0.35);
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    // 4. Radiators (thin cyan panels perpendicular to the truss)
+    ctx.strokeStyle = `rgba(140,255,214,${0.65 * alpha})`;
+    ctx.fillStyle = `rgba(140,255,214,${0.15 * alpha})`;
+    ctx.lineWidth = 0.8;
+    for (const x of [-size * 0.3, size * 0.15]) {
+      ctx.beginPath();
+      ctx.rect(x, -size * 0.25, size * 0.12, size * 0.5);
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    ctx.restore();
   }
 
   private drawSun(p: Point, b: number): void {
@@ -1694,9 +1827,14 @@ export class Renderer {
 
     const ctx = this.ctx;
     ctx.save();
-    ctx.strokeStyle = rgba(v.color, 0.18 * v.alpha);
-    ctx.lineWidth = 1.4;
-    ctx.setLineDash([3, 8]);
+    // Gradient from visible near the glyph to invisible at the tip.
+    const grad = ctx.createLinearGradient(pts[0].x, pts[0].y, pts[pts.length - 1].x, pts[pts.length - 1].y);
+    grad.addColorStop(0, rgba(v.color, 0.55 * v.alpha));
+    grad.addColorStop(1, rgba(v.color, 0));
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([3, 5]);
+    ctx.lineCap = "round";
     ctx.beginPath();
     ctx.moveTo(pts[0].x, pts[0].y);
     for (let i = 1; i < pts.length; i++) {
@@ -1796,14 +1934,36 @@ export class Renderer {
     const dt = cfg.speedVectorMinutes * 60;
     const aheadAbs = deadReckon(v.tr.renderedM, ac.track, ac.gs, dt);
     const aheadP = project(this.relativeToFollow(aheadAbs), proj);
+    
+    const dx = aheadP.x - v.p.x;
+    const dy = aheadP.y - v.p.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1) return;
+
+    // Cap the length to a reasonable percentage of the screen size (e.g., 8% of min screen dimension)
+    // to keep it as a clean indicator rather than a screen-spanning line.
+    const maxLenPx = Math.min(this.w, this.h) * 0.08;
+    let endX = aheadP.x;
+    let endY = aheadP.y;
+    if (len > maxLenPx) {
+      endX = v.p.x + (dx / len) * maxLenPx;
+      endY = v.p.y + (dy / len) * maxLenPx;
+    }
+
     const ctx = this.ctx;
     ctx.save();
     ctx.beginPath();
     ctx.moveTo(v.p.x, v.p.y);
-    ctx.lineTo(aheadP.x, aheadP.y);
-    ctx.strokeStyle = rgba(v.color, 0.45 * v.alpha);
+    ctx.lineTo(endX, endY);
+
+    // Beautiful gradient fading from full brightness near the plane to transparent at the tip
+    const grad = ctx.createLinearGradient(v.p.x, v.p.y, endX, endY);
+    grad.addColorStop(0, rgba(v.color, 0.45 * v.alpha));
+    grad.addColorStop(1, rgba(v.color, 0));
+
+    ctx.strokeStyle = grad;
     ctx.lineWidth = 1;
-    ctx.setLineDash([3, 5]);
+    ctx.setLineDash([3, 4]);
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.restore();

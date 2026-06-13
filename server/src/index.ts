@@ -104,6 +104,7 @@ async function main(): Promise<void> {
     supplementApi: SUPPLEMENT_API,
     apiPollMs: API_POLL_MS,
     getConfig: () => store.get(),
+    getTles: () => tleStore.getTlesSync(),
     enricher,
     onSnapshot: (now, aircraft) => {
       stats.observe(now, aircraft);
