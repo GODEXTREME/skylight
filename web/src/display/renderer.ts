@@ -1546,8 +1546,9 @@ export class Renderer {
         ctx.save();
         ctx.beginPath();
         ctx.arc(pt.x, pt.y, size, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255, 253, 245, ${a})`;
-        ctx.shadowColor = `rgba(255, 240, 200, ${a * 0.8})`;
+        const planetRgb = p.name ? (PLANET_COLORS[p.name] ?? "255,253,245") : "255,253,245";
+        ctx.fillStyle = `rgba(${planetRgb}, ${a})`;
+        ctx.shadowColor = `rgba(${planetRgb}, ${a * 0.8})`;
         ctx.shadowBlur = size * 3.5;
         ctx.fill();
         ctx.restore();
