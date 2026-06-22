@@ -326,8 +326,36 @@ export class Poller {
 
   private buildExtraUrl(template: string): string {
     const c = this.o.getConfig();
-    const lat = this.followTargetPosition?.lat ?? c.centerLat;
-    const lon = this.followTargetPosition?.lon ?? c.centerLon;
+    let lat = c.centerLat;
+    let lon = c.centerLon;
+
+    if (c.followISS) {
+      const tles = this.o.getTles();
+      const issTle = tles.find((t) => /ISS|ZARYA/i.test(t.name));
+      if (issTle) {
+        const pos = getSatellitePosition(new Date(), issTle);
+        if (pos) {
+          lat = pos.lat;
+          lon = pos.lon;
+        }
+      }
+    } else {
+      const followHex = c.followFlightHex.toLowerCase();
+      if (followHex !== this.followTargetHex) {
+        this.followTargetHex = followHex;
+        this.followTargetPosition = null;
+        this.followedAircraft = null;
+      }
+      const followed = followHex
+        ? this.last.find((ac) => ac.hex.toLowerCase() === c.followFlightHex.toLowerCase())
+        : undefined;
+      if (followed?.lat != null && followed.lon != null) {
+        this.followTargetPosition = { lat: followed.lat, lon: followed.lon };
+      }
+      lat = this.followTargetPosition?.lat ?? c.centerLat;
+      lon = this.followTargetPosition?.lon ?? c.centerLon;
+    }
+
     const r = Math.min(250, Math.ceil(c.radiusMiles * NM_PER_MILE) + 1);
     return template
       .replace("{lat}", String(lat))
