@@ -172,6 +172,45 @@ function altRamp(alt: number): [number, number, number] {
   return ALT_STOPS[ALT_STOPS.length - 1][1];
 }
 
+export function labelLines(cfg: Config, ac: Aircraft): { text: string; kind: "title" | "sub" }[] {
+  const f = cfg.showFields;
+  const out: { text: string; kind: "title" | "sub" }[] = [];
+
+  const title = f.name ?
+      cfg.nameDisplay === "flight" ?
+        ac.flight ?? ac.hex.toUpperCase() :
+        ac.airline
+    : null;
+  if (title) out.push({ text: title, kind: "title" });
+
+  const sub: string[] = [];
+  if (f.type && (ac.typeName || ac.typeCode)) sub.push(ac.typeName ?? ac.typeCode!);
+  const alt = ac.altBaro ?? ac.altGeom;
+  if (f.altitude) {
+    if (ac.onGround) sub.push("GND");
+    else if (alt != null) sub.push(`${alt.toLocaleString("en-US")} ft`);
+  }
+  if (f.speed && ac.gs != null) sub.push(formatSpeed(ac.gs, cfg.speedUnit));
+  if (sub.length) out.push({ text: sub.join("   "), kind: "sub" });
+
+  if (f.destination && ac.destination && routePlausible(ac, cfg)) {
+    const origin = cfg?.locationDisplay === "name" && ac.originName ? ac.originName : ac.origin ?? "";
+    const destination = cfg?.locationDisplay === "name" && ac.destName ? ac.destName : ac.destination ?? "";
+    out.push({ text: [origin, destination].join(' → '), kind: "sub" });
+
+    if (cfg.showRouteDetail && ac.destLat != null && ac.destLon != null) {
+      const bits: string[] = [`${localTimeAt(ac.destLat, ac.destLon)} local`];
+      if (ac.lat != null && ac.lon != null) {
+        const mi = Math.round(greatCircleMiles(ac.lat, ac.lon, ac.destLat, ac.destLon));
+        if (mi > 1) bits.push(`${mi.toLocaleString("en-US")} mi to go`);
+      }
+      out.push({ text: bits.join("   ·   "), kind: "sub" });
+    }
+  }
+  if (f.registration && ac.registration) out.push({ text: ac.registration, kind: "sub" });
+  return out;
+}
+
 const rgba = (c: [number, number, number], a: number) =>
   `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
 
@@ -1003,12 +1042,14 @@ export class Renderer {
         return Math.atan2(pb.y - pa.y, pb.x - pa.x);
       }
     }
-    // Fallback: use reported track through the projection.
-    const m = this.sampleAt(tr, tt, cfg);
-    if (m && tr.ac.track != null) {
-      const ahead = deadReckon(m, tr.ac.track, 120, 1);
-      const p0 = project(m, proj);
-      const p1 = project(ahead, proj);
+    const mid = this.sampleAt(tr, tt, cfg);
+    // Stationary or no current track? Keep the last known heading from history
+    // instead of snapping to 0° (north) — matters for parked/taxiing aircraft.
+    const track = this.fallbackAz(tr);
+    if (mid && track != null) {
+      const ahead = deadReckon(mid.m, track, 120, 1);
+      const p0 = this.toPoint(mid, cfg, proj, tr);
+      const p1 = this.toPoint({ m: ahead, altFt: mid.altFt }, cfg, proj, tr);
       return Math.atan2(p1.y - p0.y, p1.x - p0.x);
     }
     return tr.renderedHeading ?? 0;
@@ -2173,44 +2214,16 @@ export class Renderer {
     }
   }
 
-  private labelLines(cfg: Config, ac: Aircraft): { text: string; kind: "title" | "sub" }[] {
-    const f = cfg.showFields;
-    const out: { text: string; kind: "title" | "sub" }[] = [];
-    const title = f.flight ? ac.flight ?? ac.hex.toUpperCase() : ac.airline;
-    if (title) out.push({ text: title, kind: "title" });
-
-    const sub: string[] = [];
-    if (f.type && (ac.typeName || ac.typeCode)) sub.push(ac.typeName ?? ac.typeCode!);
-    if (f.altitude) {
-      sub.push(formatAltitudeLabel(ac));
-    }
-    if (f.speed && ac.gs != null) sub.push(formatSpeed(ac.gs, cfg.speedUnit));
-    if (sub.length) out.push({ text: sub.join("   "), kind: "sub" });
-
-    if (f.destination && ac.destination && routePlausible(ac, cfg)) {
-      const head = ac.origin ? `${ac.origin} → ${ac.destination}` : `→ ${ac.destination}`;
-      out.push({ text: ac.destName ? `${head}   ${ac.destName}` : head, kind: "sub" });
-      if (cfg.showRouteDetail && ac.destLat != null && ac.destLon != null) {
-        const bits: string[] = [`${localTimeAt(ac.destLat, ac.destLon)} local`];
-        if (ac.lat != null && ac.lon != null) {
-          const mi = Math.round(greatCircleMiles(ac.lat, ac.lon, ac.destLat, ac.destLon));
-          if (mi > 1) bits.push(`${mi.toLocaleString("en-US")} mi to go`);
-        }
-        out.push({ text: bits.join("   ·   "), kind: "sub" });
-      }
-    }
-    if (f.registration && ac.registration) out.push({ text: ac.registration, kind: "sub" });
-    return out;
-  }
 
   private drawLabel(cfg: Config, v: Visible, strength: number): void {
     const ctx = this.ctx;
-    const lines = this.labelLines(cfg, v.tr.ac);
+    const lines = labelLines(cfg, v.tr.ac);
     if (!lines.length) return;
     const a = v.labelAlpha * strength;
     if (a < 0.04) return;
 
     const { w, lh, h } = this.measureLabel(cfg, lines);
+
     const gap = cfg.glyphSizePx * 0.7 + 9;
     const onScreen = (b: { x: number; y: number; w: number; h: number }) =>
       b.x >= 6 && b.x + b.w <= this.w - 6 && b.y >= 6 && b.y + b.h <= this.h - 6;
@@ -2259,7 +2272,9 @@ export class Renderer {
       ctx.textBaseline = "top";
       ctx.shadowColor = "rgba(0,0,0,0.9)";
       ctx.shadowBlur = 6;
+
       let y = box.y;
+      let lastLineKind;
       for (const ln of lines) {
         if (ln.kind === "title") {
           ctx.font = `500 14px ${cfg.fonts.label}`;
@@ -2278,9 +2293,15 @@ export class Renderer {
             /* noop */
           }
         }
+
+        // after drawing the title we need a to draw further down for the following line (due to the larger font size of the title)
+        y += lastLineKind === "title" ? lh + 2 : lh;
+
         ctx.fillText(ln.text, box.x, y);
-        y += lh;
+
+        lastLineKind = ln.kind;
       }
+
       try {
         ctx.letterSpacing = "0px";
       } catch {

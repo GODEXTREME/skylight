@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Aircraft, AirportBoardDirection, Config, ShowFields, LocationProfile } from "@shared/index.js";
+import type { Aircraft, Airport, AirportBoardDirection, Config, ShowFields, LocationProfile } from "@shared/index.js";
+import { formatLatLon } from "@shared/geo.js";
+import { geoAvailability, geoErrorMessage } from "../lib/geolocation.js";
 import { useStream } from "../lib/useStream.js";
 import { nextISSPass, type Tle } from "../display/celestial.js";
-import { ColorRow, Row, Section, Segmented, Slider, Toggle } from "./components.js";
+import { labelLines } from "../display/renderer.js";
+import { ColorRow, Row, Section, Segmented, Slider, TextInput, Toggle } from "./components.js";
 import { PRESETS } from "./presets.js";
 import { LOCATION_PRESETS } from "./locationPresets.js";
 import { type City, prefetchCities, searchCities } from "../lib/cities.js";
@@ -50,13 +53,12 @@ function distanceMiles(lat1: number, lon1: number, lat2: number, lon2: number): 
 }
 
 const FIELD_LABELS: Record<keyof ShowFields, string> = {
-  airline: "Airline",
-  flight: "Flight",
+  name: "Name",
   type: "Type",
   altitude: "Altitude",
   speed: "Speed",
   verticalRate: "Vert. rate",
-  destination: "Destination",
+  destination: "Departing / Arriving",
   registration: "Registration",
 };
 
@@ -766,6 +768,143 @@ export function Control() {
     ? state.aircraft.find((a) => a.hex === selectedAc!.hex) ?? selectedAc
     : selectedAc;
 
+  const changeLocation = async (q: string) => {
+    if (!q.trim()) return;
+    setGeoBusy(true);
+    setGeoErr(null);
+    try {
+      const r = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
+      if (!r.ok) {
+        setGeoErr(r.status === 404 ? `No match for “${q}”` : "Lookup failed");
+        return;
+      }
+      const hit = (await r.json()) as { lat: number; lon: number; name: string };
+      set({ centerLat: hit.lat, centerLon: hit.lon, locationName: hit.name });
+    } catch {
+      setGeoErr("Lookup failed");
+    } finally {
+      setGeoBusy(false);
+    }
+  };
+
+  // --- saved location profiles (favorite airports) ---
+  const genId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const atCurrent = (p: { lat: number; lon: number }) =>
+    Math.abs(p.lat - cfg.centerLat) < 1e-4 && Math.abs(p.lon - cfg.centerLon) < 1e-4;
+  const switchToProfile = (p: LocationProfile) =>
+    set({ centerLat: p.lat, centerLon: p.lon, radiusMiles: p.radiusMiles, locationName: p.name });
+  const saveCurrentProfile = () => {
+    const name = cfg.locationName?.trim() || formatLatLon(cfg.centerLat, cfg.centerLon);
+    const profile: LocationProfile = {
+      id: genId(),
+      name,
+      lat: cfg.centerLat,
+      lon: cfg.centerLon,
+      radiusMiles: cfg.radiusMiles,
+    };
+    // Replace any existing profile already saved at this spot.
+    const rest = cfg.locationProfiles.filter((p) => !atCurrent(p));
+    set({ locationProfiles: [...rest, profile] });
+  };
+  const removeProfile = (id: string) =>
+    set({ locationProfiles: cfg.locationProfiles.filter((p) => p.id !== id) });
+  const centerOnTraffic = () => {
+    const ac = state.aircraft.filter((a) => a.lat != null && a.lon != null);
+    if (!ac.length) return;
+    const lat = ac.reduce((s, a) => s + (a.lat as number), 0) / ac.length;
+    const lon = ac.reduce((s, a) => s + (a.lon as number), 0) / ac.length;
+    set({ centerLat: lat, centerLon: lon, locationName: "Traffic center" });
+  };
+
+  // Import runway geometry for any airport and draw it on the ceiling.
+  const importAirport = async (code: string) => {
+    if (!code.trim()) return;
+    setApBusy(true);
+    setApErr(null);
+    try {
+      const r = await fetch(`/api/airport?code=${encodeURIComponent(code.trim())}`);
+      const body = (await r.json()) as Airport & { error?: string };
+      if (!r.ok) {
+        setApErr(body.error ?? "Lookup failed");
+        return;
+      }
+      set({ airport: body, showAirport: true });
+    } catch {
+      setApErr("Lookup failed");
+    } finally {
+      setApBusy(false);
+    }
+  };
+  const centerOnAirport = () =>
+    set({
+      centerLat: cfg.airport.lat,
+      centerLon: cfg.airport.lon,
+      locationName: cfg.airport.fullName ?? cfg.airport.icao,
+    });
+
+  const useCurrentLocation = () => {
+    const availability = geoAvailability({
+      hasGeolocation: Boolean(navigator.geolocation),
+      isSecureContext: window.isSecureContext,
+      hostname: window.location.hostname,
+    });
+    if (!availability.ok) {
+      setGeoErr(availability.message);
+      return;
+    }
+    setGeoBusy(true);
+    setGeoErr(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        set({
+          centerLat: pos.coords.latitude,
+          centerLon: pos.coords.longitude,
+          locationName: "Current location",
+        });
+        setGeoBusy(false);
+      },
+      (err) => {
+        setGeoBusy(false);
+        const insecureContext =
+          !geoAvailability({
+            hasGeolocation: true,
+            isSecureContext: window.isSecureContext,
+            hostname: window.location.hostname,
+          }).ok;
+        setGeoErr(geoErrorMessage(err.code, insecureContext));
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60_000 },
+    );
+  };
+
+  // plane preview card
+  const planePreview = labelLines(
+    cfg,
+    {
+      "hex": "4cad7b",
+      "flight": "BA001",
+      "lat": 52.4841701,
+      "lon": -1.9037858,
+      "altBaro": 60000,
+      "altGeom": 24325,
+      "gs": 1173.118,
+      "track": 155.18,
+      "baroRate": -1536,
+      "registration": "G-BOAA",
+      "typeCode": "CONC",
+      "typeName": "Concorde",
+      "airline": "British Airways",
+      "origin": "JFK",
+      "destination": "LHR",
+      "originName": "New York",
+      "destName": "London",
+      "originLat": 40.641766,
+      "originLon": -73.780968,
+      "destLat": 51.4706,
+      "destLon": -0.461941
+    },
+  );
+
   return (
     <div className="control">
       {/* Flight detail popup */}
@@ -979,28 +1118,58 @@ export function Control() {
               ]}
               onChange={(v) => set({ speedUnit: v })} />
           </Row>
-          <div className="chips">
-            {(Object.keys(FIELD_LABELS) as (keyof ShowFields)[]).map((k) => (
-              <button
-                key={k}
-                className={`chip ${cfg.showFields[k] ? "on" : ""}`}
-                onClick={() => setField(k, !cfg.showFields[k])}
-              >
-                {FIELD_LABELS[k]}
-              </button>
-            ))}
+
+          <div className="plane-preview">
+            <h3 className="plane-preview-title">Plane detail</h3>
+            <div className="chips">
+              {(Object.keys(FIELD_LABELS) as (keyof ShowFields)[]).map((k) => (
+                <button key={k}
+                  className={`chip ${cfg.showFields[k] ? "on" : ""}`}
+                  onClick={() => setField(k, !cfg.showFields[k])}>
+                  {FIELD_LABELS[k]}
+                </button>
+              ))}
+            </div>
+
+            <Row label="Name display">
+              <Segmented value={cfg.nameDisplay}
+                 options={[
+                   { value: "airline", label: "Airline" },
+                   { value: "flight", label: "Flight number" },
+                 ]}
+                 onChange={(v) => set({ nameDisplay: v })} />
+            </Row>
+
+            <Row label="Departing / Arriving display">
+              <Segmented value={cfg.locationDisplay}
+                options={[
+                  { value: "name", label: "Name" },
+                  { value: "iata", label: "IATA" },
+                ]}
+                onChange={(v) => set({ locationDisplay: v })} />
+            </Row>
+
+            <h3 className="plane-preview-title">Preview</h3>
+            <div className="plane-preview-card">
+              {
+                planePreview.map(
+                  (row, index) => {
+                    const text = row?.text?.split(/\s{2,}/);
+
+                    if (!text) {
+                      return null;
+                    }
+
+                    return (
+                      <div key={`plane-preview-row-${index}`} className={`plane-preview-card-row plane-preview-card-row-${row?.kind}`}>
+                        {text.map((t) => (<span key={t}>{t}</span>))}
+                      </div>
+                    );
+                  }
+                )
+              }
+            </div>
           </div>
-          <Row label="Speed unit">
-            <Segmented
-              value={cfg.speedUnit}
-              options={[
-                { value: "kt", label: "kt" },
-                { value: "mph", label: "mph" },
-                { value: "kmh", label: "km/h" },
-              ]}
-              onChange={(v) => set({ speedUnit: v })}
-            />
-          </Row>
         </Section>
 
         <Section title="Filters">
@@ -1085,6 +1254,18 @@ export function Control() {
           <Row label="Stars">
             <Toggle value={cfg.showStars} onChange={(v) => set({ showStars: v })} />
           </Row>
+          {cfg.showStars && (
+            <>
+              <Row label="Star density" indent={true}>
+                <Slider value={cfg.starMagLimit} min={1} max={4} step={0.1}
+                  onChange={(v) => set({ starMagLimit: v })} />
+              </Row>
+              <Row label="Star labels" hint="higher = more names" indent={true}>
+                <Slider value={cfg.starLabelMagLimit} min={0} max={3} step={0.1}
+                  onChange={(v) => set({ starLabelMagLimit: v })} />
+              </Row>
+            </>
+          )}
           <Row label="Sun">
             <Toggle value={cfg.showSun} onChange={(v) => set({ showSun: v })} />
           </Row>
@@ -1101,14 +1282,6 @@ export function Control() {
           )}
           <Row label="Planets" hint="Venus, Jupiter, Mars…">
             <Toggle value={cfg.showPlanets} onChange={(v) => set({ showPlanets: v })} />
-          </Row>
-          <Row label="Star density">
-            <Slider value={cfg.starMagLimit} min={1} max={4} step={0.1}
-              onChange={(v) => set({ starMagLimit: v })} />
-          </Row>
-          <Row label="Star labels" hint="higher = more names">
-            <Slider value={cfg.starLabelMagLimit} min={0} max={3} step={0.1}
-              onChange={(v) => set({ starLabelMagLimit: v })} />
           </Row>
           <Row label="Sky time" hint={skyTimeLabel(cfg.skyTimeOffsetMin)}>
             <Slider value={cfg.skyTimeOffsetMin} min={-720} max={720} step={5} unit="m"

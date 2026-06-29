@@ -3,6 +3,7 @@ import { type Aircraft, type Config, type Theme, DEFAULT_CONFIG } from "@shared/
 import { useStream } from "../lib/useStream.js";
 import { loadRuntimeAirports, registerAirports, type Airport } from "./airports.js";
 import { fetchNearbyAirports } from "../components/ourairports.js";
+import { useAmbientMode, kioskRequested } from "../lib/useAmbientMode.js";
 import { Renderer, type AircraftHit, type SkyHit } from "./renderer.js";
 
 function greatCircleMiles(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -104,6 +105,8 @@ function TelemetryGraph({ history }: { history: { ts: number; alt: number; gs: n
 
 export function Display() {
   const { state, conn } = useStream("display");
+  const ambient = useAmbientMode();
+  const isKiosk = kioskRequested();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const configRef = useRef<Config>(state.config ?? DEFAULT_CONFIG);
@@ -185,6 +188,10 @@ export function Display() {
   // We accumulate radius changes locally and commit after scrolling stops.
   const wheelRadius = useRef<number | null>(null);   // null = use config value
   const wheelTimer  = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Latest ambient toggle in a ref so the keydown listener stays subscribed once.
+  const ambientToggleRef = useRef(ambient.toggle);
+  ambientToggleRef.current = ambient.toggle;
 
   // ── Renderer setup ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -707,6 +714,9 @@ export function Display() {
         case "h":
           connRef.current.patchConfig({ showHud: !c.showHud });
           break;
+        case "f":
+          ambientToggleRef.current();
+          break;
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1074,6 +1084,22 @@ export function Display() {
         </div>
       )}
 
+      {!isKiosk && (
+        <button
+          type="button"
+          className={`ambient-toggle ${ambient.active ? "on" : ""}`}
+          onClick={() => ambient.toggle()}
+          title={
+            ambient.active
+              ? "Exit ambient mode (fullscreen + keep awake) — press f"
+              : "Ambient mode: fullscreen + keep screen awake — press f"
+          }
+          aria-label="Toggle ambient fullscreen mode"
+        >
+          {ambient.active ? "◱ exit ambient" : "◳ ambient"}
+          {ambient.active && !ambient.wakeLocked && <span className="ambient-warn"> · no wake-lock</span>}
+        </button>
+      )}
     </div>
   );
 }
