@@ -147,7 +147,7 @@ export function computeSky(date: Date, latDeg: number, lonDeg: number, o: SkyOpt
       const look = satellite.ecfToLookAngles(observerGd, ecf);
       const alt = look.elevation * R2D;
       if (alt < 0) continue; // below horizon
-      const isISS = /ISS|ZARYA/i.test(tle.name);
+      const isISS = /\bISS\b|\bZARYA\b/i.test(tle.name);
       sky.sats.push({
         kind: isISS ? "iss" : "satellite",
         name: tle.name.replace(/\s*\(.*\)\s*$/, "").trim(),
@@ -182,7 +182,7 @@ export function nextISSPass(
   minAlt = 10,
   horizonHours = 12,
 ): number | null {
-  const iss = tles.find((t) => /ISS|ZARYA/i.test(t.name));
+  const iss = tles.find((t) => /\bISS\b|\bZARYA\b/i.test(t.name));
   if (!iss) return null;
   const rec = getSatrec(iss);
   if (!rec) return null;

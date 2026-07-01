@@ -60,10 +60,11 @@ export const star = (id: string): Star | undefined => byId.get(id);
 
 /** Asterism line segments, by star id, drawn faintly when both ends are up. */
 export const ASTERISMS: [string, string][] = [
-  // Orion
-  ["betelgeuse", "alnitak"], ["bellatrix", "alnilam"], ["alnitak", "alnilam"],
-  ["alnilam", "mintaka"], ["alnitak", "saiph"], ["mintaka", "rigel"],
-  ["betelgeuse", "bellatrix"],
+  // Orion — shoulders, two diagonals down to the belt, the belt itself, two
+  // diagonals down to the feet, and the feet, forming the classic hourglass.
+  ["betelgeuse", "bellatrix"], ["betelgeuse", "alnitak"], ["bellatrix", "mintaka"],
+  ["alnitak", "alnilam"], ["alnilam", "mintaka"],
+  ["alnitak", "saiph"], ["mintaka", "rigel"], ["saiph", "rigel"],
   // Big Dipper
   ["dubhe", "merak"], ["merak", "phecda"], ["phecda", "megrez"],
   ["megrez", "dubhe"], ["megrez", "alioth"], ["alioth", "mizar"],
