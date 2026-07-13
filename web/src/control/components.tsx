@@ -1,6 +1,7 @@
 // Small, touch-friendly control primitives for the phone settings panel.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { round } from "@shared/index.js";
 
 export function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -37,6 +38,7 @@ export function Toggle({ value, onChange }: { value: boolean; onChange: (v: bool
 }
 
 export function Slider({
+  id,
   value,
   min,
   max,
@@ -44,6 +46,7 @@ export function Slider({
   unit = "",
   onChange,
 }: {
+  id: string;
   value: number;
   min: number;
   max: number;
@@ -51,16 +54,27 @@ export function Slider({
   unit?: string;
   onChange: (v: number) => void;
 }) {
+  // Keep the handle under the pointer while dragging; parent value may lag after unit conversion.
+  const [active, setActive] = useState(false);
+  const [local, setLocal] = useState(value);
+  useEffect(() => {
+    if (!active) setLocal(value);
+  }, [value, active]);
+
+  const display = active ? local : value;
+  const handleChange = (v: number) => {
+    setLocal(v);
+    onChange(v);
+  };
+  const release = () => setActive(false);
+
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const displayValue = Number.isInteger(step) ? String(value) : value.toFixed(2);
-
   const startEdit = () => {
-    setDraft(displayValue);
+    setDraft(String(round(display, (step ?? 1) >= 1 ? 0 : 1)));
     setEditing(true);
-    // Focus after render
     setTimeout(() => inputRef.current?.select(), 0);
   };
 
@@ -68,31 +82,33 @@ export function Slider({
     const parsed = parseFloat(draft.replace(",", "."));
     if (!isNaN(parsed)) {
       const clamped = Math.max(min, Math.min(max, parsed));
-      // Round to nearest step
-      const stepped = Math.round(clamped / step) * step;
-      const final = parseFloat(stepped.toFixed(10)); // avoid float jitter
+      const stepped = Math.round(clamped / (step ?? 1)) * (step ?? 1);
+      const final = parseFloat(stepped.toFixed(10));
       onChange(final);
     }
     setEditing(false);
   };
 
-  const cancelEdit = () => {
-    setEditing(false);
-  };
+  const cancelEdit = () => setEditing(false);
 
   return (
     <div className="slider">
       <input
+        id={`${id}-slider`}
         type="range"
         min={min}
         max={max}
         step={step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
+        value={display}
+        onPointerDown={() => setActive(true)}
+        onPointerUp={release}
+        onPointerCancel={release}
+        onChange={(e) => handleChange(Number(e.target.value))}
       />
       {editing ? (
         <input
           ref={inputRef}
+          id={`${id}-number`}
           className="slider-value slider-value-edit"
           type="number"
           min={min}
@@ -113,7 +129,7 @@ export function Slider({
           title="Click to type a value"
           onClick={startEdit}
         >
-          {displayValue}{unit}
+          {round(display, (step ?? 1) >= 1 ? 0 : 1)}{unit}
         </span>
       )}
     </div>

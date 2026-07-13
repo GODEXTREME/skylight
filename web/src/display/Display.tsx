@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
-import { type Aircraft, type Config, type Theme, DEFAULT_CONFIG } from "@shared/index.js";
+import { type Aircraft, type Config, type Theme, DEFAULT_CONFIG, formatDistance } from "@shared/index.js";
 import { useStream } from "../lib/useStream.js";
 import { loadRuntimeAirports, registerAirports, type Airport } from "./airports.js";
 import { fetchNearbyAirports } from "../components/ourairports.js";
@@ -1032,7 +1032,7 @@ export function Display() {
           <span>
             {state.status?.source ?? "—"} · {state.aircraft.length} ac ·{" "}
             rot {cfg.rotationDeg}° · mirror {cfg.mirrorX ? "X" : "–"}
-            {cfg.mirrorY ? "Y" : ""} · r {cfg.radiusMiles}mi · {cfg.projectionMode} · {cfg.theme}
+            {cfg.mirrorY ? "Y" : ""} · r {formatDistance(cfg.radiusMiles, cfg.distanceUnit)} · {cfg.projectionMode} · {cfg.theme}
             {rendererStats.estimated > 0 && ` · ${rendererStats.estimated} est`}
             {rendererStats.stale > 0 && ` · ${rendererStats.stale} stale`}
             {cfg.followFlightHex &&
