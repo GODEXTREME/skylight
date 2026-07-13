@@ -71,9 +71,6 @@ function normalize(raw: RawAircraft, ts: number): Aircraft | null {
   };
 }
 
-/** Airplanes.live radius is nautical miles; SkyLight config uses statute miles. */
-const NM_PER_MILE = 0.868976;
-
 class HttpError extends Error {
   constructor(
     public readonly status: number,

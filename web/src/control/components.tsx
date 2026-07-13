@@ -46,7 +46,7 @@ export function Slider({
   unit = "",
   onChange,
 }: {
-  id: string;
+  id?: string;
   value: number;
   min: number;
   max: number;

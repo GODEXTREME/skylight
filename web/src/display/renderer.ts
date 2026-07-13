@@ -1051,6 +1051,14 @@ export class Renderer {
     ctx.restore();
   }
 
+  private fallbackAz(tr: Track): number | null {
+    for (let i = tr.history.length - 1; i >= 0; i--) {
+      const t = tr.history.at(i).track;
+      if (t != null) return t;
+    }
+    return tr.ac.track ?? null;
+  }
+
   private screenHeading(tr: Track, tt: number, cfg: Config, proj: ProjOpts): number {
     // Reported ground track first: it's transponder-smoothed and stays stable
     // even when the aircraft barely moves on screen. Slow GA traffic at a wide

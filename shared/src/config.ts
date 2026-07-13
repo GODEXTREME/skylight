@@ -12,7 +12,7 @@ import type {
   ViscaUnitScale,
 } from "./camera.js";
 import type { FovPoint } from "./aim.js";
-import { SFO_AIRPORT, type Airport } from "./airport.js";
+import type { Airport } from "./airport.js";
 import { CONSTELLATIONS } from "./stars.js";
 
 export type Theme = "ambient" | "telemetry" | "focus";
