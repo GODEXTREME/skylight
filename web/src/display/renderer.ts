@@ -20,13 +20,23 @@ import {
   llToMeters,
   project,
   pxPerMeter,
+  convertDistance,
   deadReckon,
   rangeMeters,
   metersToMiles,
   formatSpeed,
+  formatAltitude,
+  formatDistance,
   projectSkyPoint,
   lerpAzimuth,
+  DEG,
   EMERGENCY_SQUAWKS,
+  bearing,
+  greatCircleMiles,
+  routePlausible,
+  FT_TO_M,
+  KM_TO_M,
+  MI_TO_M,
   type Aircraft,
   type Config,
   type Meters,
@@ -36,7 +46,7 @@ import {
 import { AIRPORTS, getAirportRevision, type Airport, type AirportArea } from "./airports.js";
 import { classifyGlyph, drawAircraftGlyph, GLYPH_SCALE } from "./aircraftGlyph.js";
 import { computeSky, getSatellitePosition, type Sky, type Tle } from "./celestial.js";
-import { ASTERISMS } from "./stars.js";
+import { visibleAsterisms } from "./stars.js";
 import { CITIES } from "./cities.js";
 import { WeatherRadar } from "./weather.js";
 import tzLookup from "tz-lookup";
@@ -53,6 +63,29 @@ const PLANET_COLORS: Record<string, string> = {
   Saturn: "232,217,160",
   Mercury: "200,192,176",
 };
+
+/** Screen radius for a planet glyph from its magnitude. */
+function planetDrawSize(mag: number): number {
+  return Math.max(1.6, Math.min(4, 3 - mag * 0.5));
+}
+
+/** Screen radius for a star glyph from its magnitude. */
+function starDrawSize(mag: number): number {
+  return Math.max(0.6, 2.6 - mag * 0.7);
+}
+
+/** Gap between sky-object edge and label anchor, px. */
+const SKY_LABEL_GAP = 4;
+
+interface SkyLabelEntry {
+  p: Point;
+  name: string;
+  color: string;
+  size: number;
+  alpha: number;
+  /** Lower = brighter / more important; gets the preferred slot first. */
+  priority: number;
+}
 
 interface Sample {
   t: number; // performance.now() at arrival
@@ -124,6 +157,8 @@ interface Track {
   /** Exponentially smoothed heading in radians (screen space). Eliminates
    *  per-fix rotation jitter caused by quantised ADS-B track values. */
   renderedHeading?: number;
+  /** Eased on-screen glyph heading (rad), so track updates rotate smoothly (#61). */
+  headingSmooth?: number;
   /** Cached llToMeters results for the trail. Avoids recomputing trig every
    *  frame — only rebuilt when the center or history changes. */
   trailMeters?: Meters[];
@@ -188,7 +223,7 @@ export function labelLines(cfg: Config, ac: Aircraft): { text: string; kind: "ti
   const alt = ac.altBaro ?? ac.altGeom;
   if (f.altitude) {
     if (ac.onGround) sub.push("GND");
-    else if (alt != null) sub.push(`${alt.toLocaleString("en-US")} ft`);
+    else if (alt != null) sub.push(formatAltitude(alt, cfg.altitudeUnit));
   }
   if (f.speed && ac.gs != null) sub.push(formatSpeed(ac.gs, cfg.speedUnit));
   if (sub.length) out.push({ text: sub.join("   "), kind: "sub" });
@@ -202,7 +237,7 @@ export function labelLines(cfg: Config, ac: Aircraft): { text: string; kind: "ti
       const bits: string[] = [`${localTimeAt(ac.destLat, ac.destLon)} local`];
       if (ac.lat != null && ac.lon != null) {
         const mi = Math.round(greatCircleMiles(ac.lat, ac.lon, ac.destLat, ac.destLon));
-        if (mi > 1) bits.push(`${mi.toLocaleString("en-US")} mi to go`);
+        if (mi > 1) bits.push(`${formatDistance(mi, cfg.distanceUnit)} to go`);
       }
       out.push({ text: bits.join("   ·   "), kind: "sub" });
     }
@@ -907,7 +942,13 @@ export class Renderer {
       if (rangeMi > cfg.radiusMiles * 1.08) continue;
 
       const p = project(relativeM, proj);
-      const heading = this.screenHeading(tr, tt, cfg, proj, frameDt);
+      // Ease the glyph toward its target heading (shortest arc) so once-a-fix
+      // track changes read as a turn, not a snap (#61).
+      const headingRaw = this.screenHeading(tr, tt, cfg, proj);
+      const prevHeading = tr.headingSmooth ?? headingRaw;
+      const arc = ((headingRaw - prevHeading + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+      const heading = prevHeading + arc * Math.min(1, frameDt * 6);
+      tr.headingSmooth = heading;
       const edgeFade = clamp01((cfg.radiusMiles - rangeMi) / (cfg.radiusMiles * 0.14));
       const alpha = clamp01(edgeFade) * tr.life * cfg.brightness;
       const labelAlpha = clamp01(edgeFade) * tr.labelLife * cfg.brightness;
@@ -1010,49 +1051,41 @@ export class Renderer {
     ctx.restore();
   }
 
-  private screenHeading(tr: Track, tt: number, cfg: Config, proj: ProjOpts, frameDt: number): number {
-    // Narrow window: ±150 ms straddles a single fix interval at 1 Hz without
-    // reaching back into the previous segment (which ±400 ms could do).
-    const raw = this.computeRawHeading(tr, tt, cfg, proj);
-
-    // Smooth heading with a short time constant (tau ~120 ms) so per-fix
-    // quantisation jitter (~5° ADS-B steps) is absorbed without lag.
-    // Uses actual frameDt so the rate is identical at 30 fps and 60 fps.
-    if (tr.renderedHeading === undefined) {
-      tr.renderedHeading = raw;
-    } else {
-      // Shortest-arc interpolation — avoids spinning through 360° on wrap.
-      let delta = raw - tr.renderedHeading;
-      if (delta > Math.PI)  delta -= 2 * Math.PI;
-      if (delta < -Math.PI) delta += 2 * Math.PI;
-      const headingTau = 0.12;
-      const headingFactor = 1 - Math.exp(-frameDt / headingTau);
-      tr.renderedHeading += delta * headingFactor;
+  private fallbackAz(tr: Track): number | null {
+    for (let i = tr.history.length - 1; i >= 0; i--) {
+      const t = tr.history.at(i).track;
+      if (t != null) return t;
     }
-    return tr.renderedHeading;
+    return tr.ac.track ?? null;
   }
 
-  private computeRawHeading(tr: Track, tt: number, cfg: Config, proj: ProjOpts): number {
-    const a = this.sampleAt(tr, tt - 150, cfg);
-    const b = this.sampleAt(tr, tt + 150, cfg);
+  private screenHeading(tr: Track, tt: number, cfg: Config, proj: ProjOpts): number {
+    // Reported ground track first: it's transponder-smoothed and stays stable
+    // even when the aircraft barely moves on screen. Slow GA traffic at a wide
+    // radius covers well under a pixel in this ±400 ms window, so a heading
+    // derived from screen positions is atan2 of fix noise — the glyph spins
+    // like a radar sweep (#61). Projecting a dead-reckoned point through the
+    // same transform keeps rotation/mirror/sky-dome handling intact.
+    const mid = this.sampleAt(tr, tt, cfg);
+    const track = this.fallbackAz(tr);
+    if (mid && track != null) {
+      const ahead = deadReckon(mid, track, 120, 1);
+      const p0 = project(this.relativeToFollow(mid), proj);
+      const p1 = project(this.relativeToFollow(ahead), proj);
+      return Math.atan2(p1.y - p0.y, p1.x - p0.x);
+    }
+    // No reported track anywhere in history: fall back to screen motion, but
+    // only over a baseline long enough that position jitter can't dominate.
+    const a = this.sampleAt(tr, tt - 400, cfg);
+    const b = this.sampleAt(tr, tt + 400, cfg);
     if (a && b) {
       const pa = project(this.relativeToFollow(a), proj);
       const pb = project(this.relativeToFollow(b), proj);
-      if (Math.hypot(pb.x - pa.x, pb.y - pa.y) > 0.5) {
+      if (Math.hypot(pb.x - pa.x, pb.y - pa.y) > 2) {
         return Math.atan2(pb.y - pa.y, pb.x - pa.x);
       }
     }
-    const mid = this.sampleAt(tr, tt, cfg);
-    // Stationary or no current track? Keep the last known heading from history
-    // instead of snapping to 0° (north) — matters for parked/taxiing aircraft.
-    const track = this.fallbackAz(tr);
-    if (mid && track != null) {
-      const ahead = deadReckon(mid.m, track, 120, 1);
-      const p0 = this.toPoint(mid, cfg, proj, tr);
-      const p1 = this.toPoint({ m: ahead, altFt: mid.altFt }, cfg, proj, tr);
-      return Math.atan2(p1.y - p0.y, p1.x - p0.x);
-    }
-    return tr.renderedHeading ?? 0;
+    return 0;
   }
 
   // --- overlays: whisper-quiet rings + compass ---
@@ -1086,8 +1119,8 @@ export class Renderer {
           ctx.fillText(`${elev}°`, cx + r + 4, cy);
         }
       } else {
-        for (let mi = 1; mi <= Math.floor(cfg.radiusMiles); mi++) {
-          const r = mi * 1609.34 * proj.pxPerM;
+        for (let step = 1; step <= Math.floor(convertDistance(cfg.radiusMiles, cfg.distanceUnit)); step++) {
+          const r = step * (cfg.distanceUnit === "mi" ? MI_TO_M : KM_TO_M) * proj.pxPerM;
           ctx.beginPath();
           ctx.arc(cx, cy, r, 0, Math.PI * 2);
           ctx.strokeStyle = rgba(hexToRgb(cfg.palette.grid), 0.5 * cfg.brightness);
@@ -1181,7 +1214,7 @@ export class Renderer {
         const a = this.toScreen(r.le, cfg, proj);
         const b = this.toScreen(r.he, cfg, proj);
         // True runway width in px, nudged up a touch so it stays legible.
-        const wpx = Math.max(2.5, r.widthFt * 0.3048 * proj.pxPerM * 1.4);
+        const wpx = Math.max(2.5, r.widthFt * FT_TO_M * proj.pxPerM * 1.4);
 
         ctx.save();
         ctx.lineCap = "butt";
@@ -1497,6 +1530,7 @@ export class Renderer {
     const b = cfg.brightness;
     // Rebuild sky hit targets every frame so they stay in sync with animation.
     const newSkyHits: SkyHit[] = [];
+    const skyLabels: SkyLabelEntry[] = [];
 
     // Asterism lines (faint) — need star screen points by id.
     if (cfg.showStars && this.sky.stars.length) {
@@ -1507,7 +1541,7 @@ export class Renderer {
       ctx.save();
       ctx.strokeStyle = `rgba(150,170,220,${0.14 * b})`;
       ctx.lineWidth = 1;
-      for (const [a, c] of ASTERISMS) {
+      for (const [a, c] of visibleAsterisms(cfg.constellations)) {
         const pa = pts.get(a);
         const pc = pts.get(c);
         if (pa && pc) {
@@ -1562,7 +1596,7 @@ export class Renderer {
       for (const s of this.sky.stars) {
         const p = pts.get(s.id!)!;
         const mag = s.mag ?? 2;
-        const size = Math.max(0.6, 2.6 - mag * 0.7);
+        const size = starDrawSize(mag);
         const tw = 0.78 + 0.22 * Math.sin(this.frameT * 3 + s.az);
         const a = clamp01((2.8 - mag) / 3) * b * tw;
         ctx.beginPath();
@@ -1574,7 +1608,16 @@ export class Renderer {
         }
         ctx.fill();
         ctx.shadowBlur = 0;
-        if (mag < cfg.starLabelMagLimit && s.name) this.skyLabel(p, s.name, cfg, 0.5 * b);
+        if (mag < cfg.starLabelMagLimit && s.name) {
+          skyLabels.push({
+            p,
+            name: s.name,
+            color: "#AEB6C6",
+            size,
+            alpha: 0.5 * b,
+            priority: mag,
+          });
+        }
       }
     }
 
@@ -1582,9 +1625,8 @@ export class Renderer {
       for (const p of this.sky.planets) {
         const pt = this.projectSky(p.az, p.alt, cfg, proj);
         const mag = p.mag ?? 1;
-        const size = Math.max(2.0, 3.5 - mag * 0.4);
+        const size = planetDrawSize(mag);
         const a = 0.95 * b;
-        ctx.save();
         ctx.beginPath();
         ctx.arc(pt.x, pt.y, size, 0, Math.PI * 2);
         const planetRgb = p.name ? (PLANET_COLORS[p.name] ?? "255,253,245") : "255,253,245";
@@ -1592,8 +1634,17 @@ export class Renderer {
         ctx.shadowColor = `rgba(${planetRgb}, ${a * 0.8})`;
         ctx.shadowBlur = size * 3.5;
         ctx.fill();
-        ctx.restore();
-        if (p.name) this.skyLabel(pt, p.name, cfg, 0.65 * b);
+        ctx.shadowBlur = 0;
+        if (p.name) {
+          skyLabels.push({
+            p: pt,
+            name: p.name,
+            color: `rgb(${(PLANET_COLORS[p.name] ?? "255,253,245")})`,
+            size,
+            alpha: 0.7 * b,
+            priority: mag,
+          });
+        }
       }
     }
 
@@ -1679,6 +1730,7 @@ export class Renderer {
     }
 
     this.skyHits = newSkyHits;
+    if (skyLabels.length) this.placeSkyLabels(skyLabels, cfg);
   }
 
   private drawIssStructure(ctx: CanvasRenderingContext2D, px: number, py: number, size: number, b: number): void {
@@ -1701,7 +1753,7 @@ export class Renderer {
 
     // 2. Central pressurized modules
     ctx.fillRect(-size * 0.25, -size * 0.15, size * 0.5, size * 0.3);
-    
+
     // Perpendicular lab modules
     ctx.fillRect(-size * 0.08, -size * 0.35, size * 0.16, size * 0.7);
 
@@ -1798,21 +1850,29 @@ export class Renderer {
     ctx.restore();
   }
 
-  private skyLabel(p: Point, text: string, cfg: Config, alpha: number, color = "#AEB6C6"): void {
+  private skyLabel(
+    p: Point,
+    text: string,
+    cfg: Config,
+    alpha: number,
+    color = "#AEB6C6",
+    align: CanvasTextAlign = "left",
+  ): void {
     const ctx = this.ctx;
     this.withLabelRotation(cfg, p.x, p.y, () => {
       ctx.save();
       ctx.font = `300 10px ${cfg.fonts.label}`;
       ctx.fillStyle = color;
       ctx.globalAlpha = alpha;
-      ctx.textAlign = "left";
+      ctx.textAlign = align;
       ctx.textBaseline = "middle";
       try {
         ctx.letterSpacing = "1px";
       } catch {
         /* noop */
       }
-      ctx.fillText(text, p.x + 5, p.y);
+      const tx = align === "right" ? p.x - 5 : align === "center" ? p.x : p.x + 5;
+      ctx.fillText(text, tx, p.y);
       try {
         ctx.letterSpacing = "0px";
       } catch {
@@ -1820,6 +1880,100 @@ export class Renderer {
       }
       ctx.restore();
     });
+  }
+
+  private measureSkyLabel(text: string, cfg: Config): { w: number; h: number } {
+    const ctx = this.ctx;
+    ctx.font = `300 10px ${cfg.fonts.label}`;
+    try {
+      ctx.letterSpacing = "1px";
+    } catch {
+      /* noop */
+    }
+    const w = ctx.measureText(text).width;
+    try {
+      ctx.letterSpacing = "0px";
+    } catch {
+      /* noop */
+    }
+    return { w: w + 2, h: 12 };
+  }
+
+  private skyLabelBox(
+    anchor: Point,
+    w: number,
+    h: number,
+    align: CanvasTextAlign,
+  ): { x: number; y: number; w: number; h: number } {
+    let x: number;
+    if (align === "right") x = anchor.x - 5 - w;
+    else if (align === "center") x = anchor.x - w / 2;
+    else x = anchor.x + 5;
+    return { x, y: anchor.y - h / 2, w, h };
+  }
+
+  /** Candidate label positions at a fixed gap from the object edge. */
+  private skyLabelSlots(
+    p: Point,
+    size: number,
+    h: number,
+  ): { anchor: Point; align: CanvasTextAlign }[] {
+    const g = SKY_LABEL_GAP;
+    const r = size + g;
+    const d = r * Math.SQRT1_2;
+    const v = r + h / 2;
+    const far = r + h + g;
+    const farD = far * Math.SQRT1_2;
+
+    return [
+      { anchor: { x: p.x + d, y: p.y - d }, align: "left" },
+      { anchor: { x: p.x + d, y: p.y + d }, align: "left" },
+      { anchor: { x: p.x - d, y: p.y - d }, align: "right" },
+      { anchor: { x: p.x - d, y: p.y + d }, align: "right" },
+      { anchor: { x: p.x, y: p.y - v }, align: "center" },
+      { anchor: { x: p.x, y: p.y + v }, align: "center" },
+      { anchor: { x: p.x + farD, y: p.y - farD }, align: "left" },
+      { anchor: { x: p.x - farD, y: p.y - farD }, align: "right" },
+    ];
+  }
+
+  /** Place sky-object labels so they never overlap each other. */
+  private placeSkyLabels(entries: SkyLabelEntry[], cfg: Config): void {
+    const placed: { x: number; y: number; w: number; h: number }[] = [];
+    const onScreen = (b: { x: number; y: number; w: number; h: number }) =>
+      b.x >= 6 && b.x + b.w <= this.w - 6 && b.y >= 6 && b.y + b.h <= this.h - 6;
+
+    const sorted = [...entries].sort((a, b) => a.priority - b.priority);
+
+    for (const entry of sorted) {
+      const { w, h } = this.measureSkyLabel(entry.name, cfg);
+      type Slot = { anchor: Point; align: CanvasTextAlign };
+      const slots: Slot[] = this.skyLabelSlots(entry.p, entry.size, h);
+
+      let chosen: Slot | null = null;
+      for (const slot of slots) {
+        const box = this.skyLabelBox(slot.anchor, w, h, slot.align);
+        if (onScreen(box) && !this.collides(box, placed)) {
+          chosen = slot;
+          placed.push(box);
+          break;
+        }
+      }
+      if (!chosen) {
+        let slot = slots[0];
+        let box = this.skyLabelBox(slot.anchor, w, h, slot.align);
+        for (let k = 0; k < 10 && (this.collides(box, placed) || !onScreen(box)); k++) {
+          slot = {
+            anchor: { x: slot.anchor.x, y: slot.anchor.y - (h + SKY_LABEL_GAP) },
+            align: slot.align,
+          };
+          box = this.skyLabelBox(slot.anchor, w, h, slot.align);
+        }
+        chosen = slot;
+        placed.push(box);
+      }
+      this.skyLabel(chosen.anchor, entry.name, cfg, entry.alpha, entry.color, chosen.align);
+    }
   }
 
   // --- flight plan trajectory: full great-circle arc from origin to destination ---
@@ -2176,9 +2330,13 @@ export class Renderer {
     return { w: w + 2, lh, h: lines.length * lh };
   }
 
-  private collides(b: { x: number; y: number; w: number; h: number }): boolean {
+  private collides(
+    b: { x: number; y: number; w: number; h: number },
+    boxes?: { x: number; y: number; w: number; h: number }[],
+  ): boolean {
     const pad = 3;
-    for (const p of this.labelCandidates(b, pad)) {
+    const iter = boxes ?? this.labelCandidates(b, pad);
+    for (const p of iter) {
       if (
         b.x - pad < p.x + p.w &&
         b.x + b.w + pad > p.x &&
@@ -2272,6 +2430,9 @@ export class Renderer {
       ctx.textBaseline = "top";
       ctx.shadowColor = "rgba(0,0,0,0.9)";
       ctx.shadowBlur = 6;
+      ctx.strokeStyle = rgba(hexToRgb(cfg.palette.bg), a);
+      ctx.lineWidth = 3;
+      ctx.lineJoin = "round";
 
       let y = box.y;
       let lastLineKind;
@@ -2297,6 +2458,7 @@ export class Renderer {
         // after drawing the title we need a to draw further down for the following line (due to the larger font size of the title)
         y += lastLineKind === "title" ? lh + 2 : lh;
 
+        ctx.strokeText(ln.text, box.x, y);
         ctx.fillText(ln.text, box.x, y);
 
         lastLineKind = ln.kind;
@@ -2408,38 +2570,50 @@ export class Renderer {
   private drawDetailPanelText(cfg: Config, v: Visible, ac: Aircraft, x: number, y: number): void {
     const ctx = this.ctx;
     ctx.save();
+
     ctx.shadowColor = "rgba(0,0,0,0.9)";
     ctx.shadowBlur = 10;
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
+    ctx.strokeStyle = rgba(hexToRgb(cfg.palette.bg), v.alpha);
+    ctx.lineWidth = 3;
+    ctx.lineJoin = "round";
     try {
       ctx.letterSpacing = "2px";
     } catch {
       /* noop */
     }
+
+    const flightText = ac.flight ?? ac.hex.toUpperCase();
     ctx.font = `300 34px ${cfg.fonts.label}`;
     ctx.fillStyle = rgba([245, 247, 255], v.alpha);
-    ctx.fillText(ac.flight ?? ac.hex.toUpperCase(), x, y);
+    ctx.strokeText(flightText, x, y);
+    ctx.fillText(flightText, x, y);
     try {
       ctx.letterSpacing = "0.5px";
     } catch {
       /* noop */
     }
+
     ctx.font = `400 15px ${cfg.fonts.label}`;
     ctx.fillStyle = rgba(hexToRgb(cfg.palette.text), 0.85 * v.alpha);
     const bits = [
       ac.airline,
       ac.typeName ?? ac.typeCode,
-      formatAltitudeLabel(ac, { verboseGround: true, includeFeetAtFlightLevel: true }),
-      ac.gs != null ? `${Math.round(ac.gs)} kt` : null,
+      ac.onGround ? "on ground" : (ac.altBaro ?? ac.altGeom) != null ? formatAltitude((ac.altBaro ?? ac.altGeom)!, cfg.altitudeUnit) : null,
+      ac.gs != null ? formatSpeed(ac.gs, cfg.speedUnit) : null,
       ac.origin && ac.destination && routePlausible(ac, cfg) ? `${ac.origin} → ${ac.destination}` : null,
     ].filter(Boolean);
-    ctx.fillText(bits.join("    ·    "), x, y + 26);
+
+    const detailText = bits.join("    ·    ");
+    ctx.strokeText(detailText, x, y + 26);
+    ctx.fillText(detailText, x, y + 26);
     try {
       ctx.letterSpacing = "0px";
     } catch {
       /* noop */
     }
+
     ctx.restore();
   }
 
@@ -2670,28 +2844,6 @@ function hexSeed(hex: string): number {
   return (n / 360) * Math.PI * 2;
 }
 
-const DEG = Math.PI / 180;
-
-/** Initial great-circle bearing (deg from North) from point 1 to point 2. */
-function bearing(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const φ1 = lat1 * DEG;
-  const φ2 = lat2 * DEG;
-  const Δλ = (lon2 - lon1) * DEG;
-  const y = Math.sin(Δλ) * Math.cos(φ2);
-  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
-  return (Math.atan2(y, x) / DEG + 360) % 360;
-}
-
-/** Great-circle distance in statute miles. */
-function greatCircleMiles(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const φ1 = lat1 * DEG;
-  const φ2 = lat2 * DEG;
-  const dφ = (lat2 - lat1) * DEG;
-  const dλ = (lon2 - lon1) * DEG;
-  const a = Math.sin(dφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(dλ / 2) ** 2;
-  return 3958.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
 /** Civil local time at a place as HH:MM (real timezone incl. DST).
  *  Falls back to longitude-based mean solar time if the tz lookup fails —
  *  solar time can read up to ~55 min off the wall clock. */
@@ -2713,83 +2865,6 @@ function localTimeAt(lat: number, lon: number, addHours = 0): string {
     const mm = Math.floor(m % 60);
     return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
   }
-}
-
-function formatAltitudeLabel(
-  ac: Aircraft,
-  options: { verboseGround?: boolean; includeFeetAtFlightLevel?: boolean } = {},
-): string {
-  const { verboseGround = false, includeFeetAtFlightLevel = false } = options;
-  if (ac.onGround) return verboseGround ? "on ground" : "GND";
-
-  const alt = ac.altBaro ?? ac.altGeom;
-  if (alt == null) return "ALT —";
-
-  const rounded = Math.max(0, Math.round(alt));
-  if (rounded >= 18000) {
-    const fl = String(Math.round(rounded / 100)).padStart(3, "0");
-    if (includeFeetAtFlightLevel) return `FL${fl} (${rounded.toLocaleString("en-US")} ft)`;
-    return `FL${fl}`;
-  }
-  return `${rounded.toLocaleString("en-US")} ft`;
-}
-
-/** Cross-track distance (miles) of a point from the great circle p1→p2. */
-function crossTrackMiles(
-  lat: number, lon: number,
-  lat1: number, lon1: number,
-  lat2: number, lon2: number,
-): number {
-  const R = 3958.8;
-  const d13 = greatCircleMiles(lat1, lon1, lat, lon) / R; // angular (rad)
-  const θ13 = bearing(lat1, lon1, lat, lon) * DEG;
-  const θ12 = bearing(lat1, lon1, lat2, lon2) * DEG;
-  return Math.asin(Math.sin(d13) * Math.sin(θ13 - θ12)) * R;
-}
-
-/**
- * Is the adsbdb route consistent with where the plane actually is and what it's
- * doing? adsbdb returns the scheduled route for a callsign, which is sometimes
- * the wrong leg. We reject a route if:
- *  (a) it's geographically impossible — the plane is neither near an endpoint
- *      nor roughly on the great-circle path; or
- *  (b) the plane's vertical trend disagrees — a climbing plane near you just
- *      departed the local airport (so that should be the origin); a descending
- *      one is arriving (the destination).
- */
-function routePlausible(ac: Aircraft, cfg: Config): boolean {
-  if (ac.lat == null || ac.lon == null) return true;
-  const haveCoords = ac.originLat != null || ac.destLat != null;
-  if (!haveCoords) return true; // legacy cache without coords — don't hide
-
-  // (a) geographic consistency
-  const nearPlane = (la?: number, lo?: number) =>
-    la != null && lo != null && greatCircleMiles(ac.lat!, ac.lon!, la, lo) < 80;
-  let geomOk = nearPlane(ac.originLat, ac.originLon) || nearPlane(ac.destLat, ac.destLon);
-  if (
-    !geomOk &&
-    ac.originLat != null && ac.originLon != null &&
-    ac.destLat != null && ac.destLon != null
-  ) {
-    geomOk = Math.abs(crossTrackMiles(ac.lat, ac.lon, ac.originLat, ac.originLon, ac.destLat, ac.destLon)) < 130;
-  } else if (!geomOk && (ac.originLat == null || ac.destLat == null)) {
-    geomOk = true; // only one endpoint known and not near — can't judge, allow
-  }
-  if (!geomOk) return false;
-
-  // (b) vertical-trend consistency for low, nearby traffic
-  const alt = ac.altBaro ?? ac.altGeom;
-  const localTraffic = greatCircleMiles(ac.lat, ac.lon, cfg.centerLat, cfg.centerLon) < 30;
-  const localAirport = (la?: number, lo?: number) =>
-    la != null && lo != null && greatCircleMiles(cfg.centerLat, cfg.centerLon, la, lo) < 45;
-  if (localTraffic && alt != null && alt < 12000 && ac.baroRate != null && Math.abs(ac.baroRate) > 250) {
-    if (ac.baroRate > 0) {
-      if (ac.originLat != null && !localAirport(ac.originLat, ac.originLon)) return false; // departing
-    } else {
-      if (ac.destLat != null && !localAirport(ac.destLat, ac.destLon)) return false; // arriving
-    }
-  }
-  return true;
 }
 
 function hexToRgb(hex: string): [number, number, number] {

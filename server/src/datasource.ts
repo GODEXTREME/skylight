@@ -4,7 +4,7 @@
 
 import type { Aircraft, Config, DataSource } from "@shared/index.js";
 import type { SourceStatus } from "@shared/index.js";
-import { llToMeters, metersToMiles, rangeMeters } from "@shared/index.js";
+import { NM_PER_MILE, llToMeters, metersToMiles, rangeMeters } from "@shared/index.js";
 import { lookupAirline, lookupType } from "./enrich/tables.js";
 import type { RouteEnricher } from "./enrich/routes.js";
 import type { Tle } from "./tle.js";
@@ -70,9 +70,6 @@ function normalize(raw: RawAircraft, ts: number): Aircraft | null {
     ts,
   };
 }
-
-/** Airplanes.live radius is nautical miles; SkyLight config uses statute miles. */
-const NM_PER_MILE = 0.868976;
 
 class HttpError extends Error {
   constructor(

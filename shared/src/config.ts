@@ -12,6 +12,8 @@ import type {
   ViscaUnitScale,
 } from "./camera.js";
 import type { FovPoint } from "./aim.js";
+import type { Airport } from "./airport.js";
+import { CONSTELLATIONS } from "./stars.js";
 
 export type Theme = "ambient" | "telemetry" | "focus";
 export type AirportBoardDirection = "arrivals" | "departures";
@@ -28,6 +30,10 @@ export type NameDisplay = "airline" | "flight";
 export type LocationDisplay = "name" | "iata";
 /** Ground-speed display unit. ADS-B reports knots; the rest are converted. */
 export type SpeedUnit = "kt" | "mph" | "kmh";
+/** Altitude display unit. */
+export type AltitudeUnit = "ft" | "m";
+/** Distance display unit. */
+export type DistanceUnit = "mi" | "km";
 /** map = flat ground plan; sky = look-up dome with altitude-aware motion. */
 export type ProjectionMode = "map" | "sky";
 
@@ -55,6 +61,11 @@ export interface LocationProfile {
   lat: number;
   lon: number;
   radiusMiles: number;
+  /** Runway overlay captured when the profile was saved, so switching
+   *  profiles restores that airport's runways without re-importing (#62). */
+  airport?: Airport;
+  /** Whether the runway overlay was visible when the profile was saved. */
+  showAirport?: boolean;
 }
 
 export interface ShowFields {
@@ -308,6 +319,10 @@ export interface Config {
   locationDisplay: LocationDisplay;
   /** Unit for the speed shown on labels (ADS-B is knots). */
   speedUnit: SpeedUnit;
+  /** Unit for the altitude shown on labels. */
+  altitudeUnit: AltitudeUnit;
+  /** Unit for the distance shown on labels. */
+  distanceUnit: DistanceUnit;
 
   // --- overlays ---
   rangeRings: boolean;
@@ -333,6 +348,8 @@ export interface Config {
   satelliteLabels: boolean;
   /** Draw the naked-eye planets (Venus, Jupiter, Mars, Saturn, Mercury). */
   showPlanets: boolean;
+  /** Per-constellation asterism line visibility. Missing/unknown ids default to visible. */
+  constellations: Record<string, boolean>;
   /** Faintest star magnitude to draw (higher = more stars). */
   starMagLimit: number;
   /** Faintest star magnitude to label with its name (higher = more names). */
@@ -437,6 +454,8 @@ export const DEFAULT_CONFIG: Config = {
   nameDisplay: "flight",
   locationDisplay: "name",
   speedUnit: "kt",
+  altitudeUnit: "ft",
+  distanceUnit: "mi",
 
   rangeRings: true,
   compass: true,
@@ -452,8 +471,9 @@ export const DEFAULT_CONFIG: Config = {
   showSatellites: true,
   followISS: false,
   satelliteLabels: false,
-  starMagLimit: 3.5,
+  starMagLimit: 2.6,
   showPlanets: true,
+  constellations: Object.fromEntries(CONSTELLATIONS.map((c) => [c.id, true])),
   starLabelMagLimit: 0.3,
   skyTimeOffsetMin: 0,
 
@@ -586,6 +606,7 @@ export function mergeConfig(base: Config, patch: Partial<Config>): Config {
     fonts: { ...base.fonts, ...(patch.fonts ?? {}) },
     showFields: { ...base.showFields, ...(patch.showFields ?? {}) },
     airportBoard: { ...base.airportBoard, ...(patch.airportBoard ?? {}) },
+    constellations: { ...base.constellations, ...(patch.constellations ?? {}) },
     tracker: mergeTrackerConfig(base.tracker, patch.tracker ?? {}),
   };
   // hideOnlyAfterSec must be >= aircraftMemorySec; clamp silently so an

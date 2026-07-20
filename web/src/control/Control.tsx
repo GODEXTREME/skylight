@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Aircraft, Airport, AirportBoardDirection, Config, ShowFields, LocationProfile } from "@shared/index.js";
-import { formatLatLon } from "@shared/geo.js";
-import { geoAvailability, geoErrorMessage } from "../lib/geolocation.js";
+import type { Aircraft, AirportBoardDirection, Config, ShowFields, LocationProfile } from "@shared/index.js";
+import { convertAltitude, convertAltitudeToFt, convertDistance, convertDistanceToMi, round } from "@shared/index.js";
+import { formatLatLon } from "@shared/format.js";
+import { CONSTELLATIONS } from "@shared/stars.js";
 import { useStream } from "../lib/useStream.js";
 import { nextISSPass, type Tle } from "../display/celestial.js";
 import { labelLines } from "../display/renderer.js";
-import { ColorRow, Row, Section, Segmented, Slider, TextInput, Toggle } from "./components.js";
+import { ColorRow, Row, Section, Segmented, Slider, Toggle } from "./components.js";
 import { PRESETS } from "./presets.js";
 import { LOCATION_PRESETS } from "./locationPresets.js";
 import { type City, prefetchCities, searchCities } from "../lib/cities.js";
@@ -530,15 +531,24 @@ function LocationSection({
   const atCurrent = (p: LocationProfile) =>
     Math.abs(p.lat - cfg.centerLat) < 1e-4 && Math.abs(p.lon - cfg.centerLon) < 1e-4;
   const switchToProfile = (p: LocationProfile) =>
-    onPatch({ centerLat: p.lat, centerLon: p.lon, radiusMiles: p.radiusMiles, locationName: p.name });
+    onPatch({
+      centerLat: p.lat,
+      centerLon: p.lon,
+      radiusMiles: p.radiusMiles,
+      locationName: p.name,
+      // Restore the runway overlay saved with the profile (#62).
+      ...(p.airport ? { customAirport: p.airport, showAirport: p.showAirport ?? true } : {}),
+    });
   const saveCurrentProfile = () => {
-    const name = cfg.locationName?.trim() || `${cfg.centerLat.toFixed(4)}, ${cfg.centerLon.toFixed(4)}`;
+    const name = cfg.locationName?.trim() || formatLatLon(cfg.centerLat, cfg.centerLon);
     const profile: LocationProfile = {
       id: genId(),
       name,
       lat: cfg.centerLat,
       lon: cfg.centerLon,
       radiusMiles: cfg.radiusMiles,
+      airport: cfg.customAirport ?? undefined,
+      showAirport: cfg.showAirport,
     };
     const rest = (cfg.locationProfiles ?? []).filter((p) => !atCurrent(p));
     onPatch({ locationProfiles: [...rest, profile] });
@@ -768,115 +778,6 @@ export function Control() {
     ? state.aircraft.find((a) => a.hex === selectedAc!.hex) ?? selectedAc
     : selectedAc;
 
-  const changeLocation = async (q: string) => {
-    if (!q.trim()) return;
-    setGeoBusy(true);
-    setGeoErr(null);
-    try {
-      const r = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
-      if (!r.ok) {
-        setGeoErr(r.status === 404 ? `No match for “${q}”` : "Lookup failed");
-        return;
-      }
-      const hit = (await r.json()) as { lat: number; lon: number; name: string };
-      set({ centerLat: hit.lat, centerLon: hit.lon, locationName: hit.name });
-    } catch {
-      setGeoErr("Lookup failed");
-    } finally {
-      setGeoBusy(false);
-    }
-  };
-
-  // --- saved location profiles (favorite airports) ---
-  const genId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-  const atCurrent = (p: { lat: number; lon: number }) =>
-    Math.abs(p.lat - cfg.centerLat) < 1e-4 && Math.abs(p.lon - cfg.centerLon) < 1e-4;
-  const switchToProfile = (p: LocationProfile) =>
-    set({ centerLat: p.lat, centerLon: p.lon, radiusMiles: p.radiusMiles, locationName: p.name });
-  const saveCurrentProfile = () => {
-    const name = cfg.locationName?.trim() || formatLatLon(cfg.centerLat, cfg.centerLon);
-    const profile: LocationProfile = {
-      id: genId(),
-      name,
-      lat: cfg.centerLat,
-      lon: cfg.centerLon,
-      radiusMiles: cfg.radiusMiles,
-    };
-    // Replace any existing profile already saved at this spot.
-    const rest = cfg.locationProfiles.filter((p) => !atCurrent(p));
-    set({ locationProfiles: [...rest, profile] });
-  };
-  const removeProfile = (id: string) =>
-    set({ locationProfiles: cfg.locationProfiles.filter((p) => p.id !== id) });
-  const centerOnTraffic = () => {
-    const ac = state.aircraft.filter((a) => a.lat != null && a.lon != null);
-    if (!ac.length) return;
-    const lat = ac.reduce((s, a) => s + (a.lat as number), 0) / ac.length;
-    const lon = ac.reduce((s, a) => s + (a.lon as number), 0) / ac.length;
-    set({ centerLat: lat, centerLon: lon, locationName: "Traffic center" });
-  };
-
-  // Import runway geometry for any airport and draw it on the ceiling.
-  const importAirport = async (code: string) => {
-    if (!code.trim()) return;
-    setApBusy(true);
-    setApErr(null);
-    try {
-      const r = await fetch(`/api/airport?code=${encodeURIComponent(code.trim())}`);
-      const body = (await r.json()) as Airport & { error?: string };
-      if (!r.ok) {
-        setApErr(body.error ?? "Lookup failed");
-        return;
-      }
-      set({ airport: body, showAirport: true });
-    } catch {
-      setApErr("Lookup failed");
-    } finally {
-      setApBusy(false);
-    }
-  };
-  const centerOnAirport = () =>
-    set({
-      centerLat: cfg.airport.lat,
-      centerLon: cfg.airport.lon,
-      locationName: cfg.airport.fullName ?? cfg.airport.icao,
-    });
-
-  const useCurrentLocation = () => {
-    const availability = geoAvailability({
-      hasGeolocation: Boolean(navigator.geolocation),
-      isSecureContext: window.isSecureContext,
-      hostname: window.location.hostname,
-    });
-    if (!availability.ok) {
-      setGeoErr(availability.message);
-      return;
-    }
-    setGeoBusy(true);
-    setGeoErr(null);
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        set({
-          centerLat: pos.coords.latitude,
-          centerLon: pos.coords.longitude,
-          locationName: "Current location",
-        });
-        setGeoBusy(false);
-      },
-      (err) => {
-        setGeoBusy(false);
-        const insecureContext =
-          !geoAvailability({
-            hasGeolocation: true,
-            isSecureContext: window.isSecureContext,
-            hostname: window.location.hostname,
-          }).ok;
-        setGeoErr(geoErrorMessage(err.code, insecureContext));
-      },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60_000 },
-    );
-  };
-
   // plane preview card
   const planePreview = labelLines(
     cfg,
@@ -1027,9 +928,37 @@ export function Control() {
           <LocationSection cfg={cfg} onPatch={set} aircraft={state.aircraft} />
         </Section>
 
+        <Section title="Units">
+          <Row label="Speed">
+            <Segmented value={cfg.speedUnit}
+              options={[
+                { value: "kt", label: "kt" },
+                { value: "mph", label: "mph" },
+                { value: "kmh", label: "km/h" },
+              ]}
+              onChange={(v) => set({ speedUnit: v })} />
+          </Row>
+          <Row label="Altitude">
+            <Segmented value={cfg.altitudeUnit}
+              options={[
+                { value: "ft", label: "ft" },
+                { value: "m", label: "m" },
+              ]}
+              onChange={(v) => set({ altitudeUnit: v })} />
+          </Row>
+          <Row label="Distance">
+            <Segmented value={cfg.distanceUnit}
+              options={[
+                { value: "mi", label: "mi" },
+                { value: "km", label: "km" },
+              ]}
+              onChange={(v) => set({ distanceUnit: v })} />
+          </Row>
+        </Section>
+
         <Section title="Calibration">
           <Row label="Rotation" hint="align field to ceiling">
-            <Slider value={cfg.rotationDeg} min={0} max={355} step={5} unit="°"
+            <Slider id="rotationDeg" value={cfg.rotationDeg} min={0} max={355} step={5} unit="°"
               onChange={(v) => set({ rotationDeg: v })} />
           </Row>
           <Row label="Mirror horizontally" hint="looking-up flip">
@@ -1039,12 +968,16 @@ export function Control() {
             <Toggle value={cfg.mirrorY} onChange={(v) => set({ mirrorY: v })} />
           </Row>
           <Row label="Label rotation" hint="text only, not the map">
-            <Slider value={cfg.labelRotationDeg} min={0} max={355} step={5} unit="°"
+            <Slider id="labelRotationDeg" value={cfg.labelRotationDeg} min={0} max={355} step={5} unit="°"
               onChange={(v) => set({ labelRotationDeg: v })} />
           </Row>
-          <Row label="Radius">
-            <Slider value={cfg.radiusMiles} min={0.5} max={10} step={0.5} unit="mi"
-              onChange={(v) => set({ radiusMiles: v })} />
+          <Row label="Radius" hint="wide ranges suit map projection best">
+            <Slider id="radiusMiles" value={convertDistance(cfg.radiusMiles, cfg.distanceUnit)}
+              min={convertDistance(0.5, cfg.distanceUnit)}
+              max={convertDistance(100, cfg.distanceUnit)}
+              step={convertDistance(0.5, cfg.distanceUnit)}
+              unit={cfg.distanceUnit}
+              onChange={(v) => set({ radiusMiles: round(convertDistanceToMi(v, cfg.distanceUnit), 1) })} />
           </Row>
           <Row label="Projection" hint="sky = realistic look-up motion">
             <Segmented
@@ -1071,15 +1004,15 @@ export function Control() {
             />
           </Row>
           <Row label="Brightness">
-            <Slider value={cfg.brightness} min={0.1} max={1} step={0.05}
+            <Slider id="brightness" value={cfg.brightness} min={0.1} max={1} step={0.05}
               onChange={(v) => set({ brightness: v })} />
           </Row>
           <Row label="Glyph size">
-            <Slider value={cfg.glyphSizePx} min={6} max={40} step={1} unit="px"
+            <Slider id="glyphSizePx" value={cfg.glyphSizePx} min={6} max={40} step={1} unit="px"
               onChange={(v) => set({ glyphSizePx: v })} />
           </Row>
           <Row label="Trail length">
-            <Slider value={cfg.trailSeconds} min={0} max={120} step={5} unit="s"
+            <Slider id="trailSeconds" value={cfg.trailSeconds} min={0} max={120} step={5} unit="s"
               onChange={(v) => set({ trailSeconds: v })} />
           </Row>
           <Row label="Trail thickness">
@@ -1105,19 +1038,10 @@ export function Control() {
           </Row>
           {cfg.labelDensity === "nearestN" && (
             <Row label="N">
-              <Slider value={cfg.nearestN} min={1} max={20} step={1}
+              <Slider id="nearestN" value={cfg.nearestN} min={1} max={20} step={1}
                 onChange={(v) => set({ nearestN: v })} />
             </Row>
           )}
-          <Row label="Speed unit">
-            <Segmented value={cfg.speedUnit}
-              options={[
-                { value: "kt", label: "kt" },
-                { value: "mph", label: "mph" },
-                { value: "kmh", label: "km/h" },
-              ]}
-              onChange={(v) => set({ speedUnit: v })} />
-          </Row>
 
           <div className="plane-preview">
             <h3 className="plane-preview-title">Plane detail</h3>
@@ -1174,12 +1098,20 @@ export function Control() {
 
         <Section title="Filters">
           <Row label="Min altitude" hint="hide ground/taxi">
-            <Slider value={cfg.minAltitudeFt} min={0} max={10000} step={100} unit="ft"
-              onChange={(v) => set({ minAltitudeFt: v })} />
+            <Slider id="minAltitudeFt" value={convertAltitude(cfg.minAltitudeFt, cfg.altitudeUnit)}
+              min={0}
+              max={convertAltitude(10000, cfg.altitudeUnit)}
+              step={convertAltitude(100, cfg.altitudeUnit)}
+              unit={cfg.altitudeUnit}
+              onChange={(v) => set({ minAltitudeFt: round(convertAltitudeToFt(v, cfg.altitudeUnit)) })} />
           </Row>
           <Row label="Max altitude">
-            <Slider value={cfg.maxAltitudeFt} min={1000} max={60000} step={1000} unit="ft"
-              onChange={(v) => set({ maxAltitudeFt: v })} />
+            <Slider id="maxAltitudeFt" value={convertAltitude(cfg.maxAltitudeFt, cfg.altitudeUnit)}
+              min={convertAltitude(1000, cfg.altitudeUnit)}
+              max={convertAltitude(60000, cfg.altitudeUnit)}
+              step={convertAltitude(1000, cfg.altitudeUnit)}
+              unit={cfg.altitudeUnit}
+              onChange={(v) => set({ maxAltitudeFt: round(convertAltitudeToFt(v, cfg.altitudeUnit)) })} />
           </Row>
           <Row label="Hide aircraft on ground">
             <Toggle value={cfg.hideOnGround} onChange={(v) => set({ hideOnGround: v })} />
@@ -1191,19 +1123,19 @@ export function Control() {
             <Toggle value={cfg.interpolate} onChange={(v) => set({ interpolate: v })} />
           </Row>
           <Row label="Smoothing" hint="0 snap · 1 slow">
-            <Slider value={cfg.smoothing} min={0} max={0.9} step={0.02}
+            <Slider id="smoothing" value={cfg.smoothing} min={0} max={0.9} step={0.02}
               onChange={(v) => set({ smoothing: v })} />
           </Row>
           <Row label="Max extrapolation">
-            <Slider value={cfg.maxExtrapolationSec} min={0} max={15} step={1} unit="s"
+            <Slider id="maxExtrapolationSec" value={cfg.maxExtrapolationSec} min={0} max={15} step={1} unit="s"
               onChange={(v) => set({ maxExtrapolationSec: v })} />
           </Row>
           <Row label="Drop after" hint="legacy — overridden by memory">
-            <Slider value={cfg.staleSec} min={5} max={60} step={1} unit="s"
+            <Slider id="staleSec" value={cfg.staleSec} min={5} max={60} step={1} unit="s"
               onChange={(v) => set({ staleSec: v })} />
           </Row>
           <Row label="Max FPS" hint="0 = uncapped">
-            <Slider value={cfg.maxFps} min={0} max={120} step={5} unit="fps"
+            <Slider id="maxFps" value={cfg.maxFps} min={0} max={120} step={5} unit="fps"
               onChange={(v) => set({ maxFps: v })} />
           </Row>
         </Section>
@@ -1257,13 +1189,19 @@ export function Control() {
           {cfg.showStars && (
             <>
               <Row label="Star density" indent={true}>
-                <Slider value={cfg.starMagLimit} min={1} max={4} step={0.1}
+                <Slider id="starMagLimit" value={cfg.starMagLimit} min={1} max={4} step={0.1}
                   onChange={(v) => set({ starMagLimit: v })} />
               </Row>
               <Row label="Star labels" hint="higher = more names" indent={true}>
-                <Slider value={cfg.starLabelMagLimit} min={0} max={3} step={0.1}
+                <Slider id="starLabelMagLimit" value={cfg.starLabelMagLimit} min={0} max={3} step={0.1}
                   onChange={(v) => set({ starLabelMagLimit: v })} />
               </Row>
+              {CONSTELLATIONS.map((c) => (
+                <Row key={c.id} label={c.name} indent={true}>
+                  <Toggle value={cfg.constellations[c.id] !== false}
+                    onChange={(v) => set({ constellations: { ...cfg.constellations, [c.id]: v } })} />
+                </Row>
+              ))}
             </>
           )}
           <Row label="Sun">
@@ -1284,7 +1222,7 @@ export function Control() {
             <Toggle value={cfg.showPlanets} onChange={(v) => set({ showPlanets: v })} />
           </Row>
           <Row label="Sky time" hint={skyTimeLabel(cfg.skyTimeOffsetMin)}>
-            <Slider value={cfg.skyTimeOffsetMin} min={-720} max={720} step={5} unit="m"
+            <Slider id="skyTimeOffsetMin" value={cfg.skyTimeOffsetMin} min={-720} max={720} step={5} unit="min"
               onChange={(v) => set({ skyTimeOffsetMin: v })} />
           </Row>
           <div className="chips">
